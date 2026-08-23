@@ -2,6 +2,8 @@
 
 A lean Vercel-compatible AI gateway profile for OmniRoute using Parad-DB as the request-scoped persistence layer. It exposes OpenAI-compatible AI routes without exposing provider credentials to client applications.
 
+> This repository does not provide a shared public gateway endpoint or shared gateway key. Deploy your own Vercel project and use your own credentials and provider configuration.
+
 ## Single dynamic chat endpoint
 
 Use one endpoint and let the gateway select an available free model dynamically:
@@ -38,6 +40,7 @@ The response includes `x-omniroute-provider` and `x-omniroute-model` headers sho
 import OpenAI from "openai";
 
 const client = new OpenAI({
+  // Set OMNIROUTE_BASE_URL to your own deployed Vercel URL.
   baseURL: `${process.env.OMNIROUTE_BASE_URL}/api/v1`,
   apiKey: process.env.OMNIROUTE_GATEWAY_KEY,
 });
@@ -60,13 +63,17 @@ OMNIROUTE_VERCEL_PROFILE=ai-only
 
 Optional provider variables can be added when the corresponding server-side integration is configured. Provider keys must remain in Vercel environment variables or Parad provider records, never in browser code.
 
-## Deploy
+## Deploy your own instance
+
+Create a Vercel project from this repository, configure your own environment variables, and deploy it. Do not use or publish another operator’s gateway URL or key.
 
 ```bash
 npm install
 npm run build
 vercel --prod
 ```
+
+After deployment, set your own client base URL to `<your-vercel-url>/api/v1` and use your own `OMNIROUTE_AI_API_KEY` value. The repository intentionally does not document a shared live endpoint.
 
 This project uses sql.js’s asm.js fallback in the Vercel AI-only build to avoid relying on a runtime WASM filesystem asset. The original OmniRoute Docker/SQLite deployment path is not modified by this lean profile.
 

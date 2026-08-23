@@ -1,6 +1,6 @@
 # OmniRoute: Complete 23-Model Live Test Report
 
-**Test target:** `https://omniroute-parad-preview-iycy6jy0h-tadi0781-5784s-projects.vercel.app`
+**Test target:** A private operator deployment; the live URL is intentionally not published in this repository.
 
 **Test date:** 2026-08-21 UTC
 
