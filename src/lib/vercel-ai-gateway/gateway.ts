@@ -191,7 +191,8 @@ function envConfiguredBuiltinProviders(): AiProvider[] {
       baseUrl: baseUrl.replace(/\/+$/, ""),
       apiKey,
       models,
-      priority: builtin.priority - 1,
+      // Keep the built-in keyless route first; use the environment key as a fallback.
+      priority: builtin.priority + 1,
     }];
   });
 }
@@ -218,10 +219,9 @@ async function listProviders(dependencies: ParadRequestDependencies = {}): Promi
   const fallback = envProvider();
   const envBuiltins = envConfiguredBuiltinProviders();
   const configuredIds = new Set(configured.map((provider) => provider.id));
-  const envBuiltinIds = new Set(envBuiltins.map((provider) => provider.id));
-  const builtins = BUILTIN_OPTIONAL_PROVIDERS.filter((provider) => !configuredIds.has(provider.id) && !envBuiltinIds.has(provider.id));
+  const builtins = BUILTIN_OPTIONAL_PROVIDERS.filter((provider) => provider.id === "opencode-zen" || !configuredIds.has(provider.id));
   const all = [...configured, ...(fallback ? [fallback] : []), ...envBuiltins, ...builtins];
-  const deduped = all.filter((provider, index, values) => values.findIndex((candidate) => candidate.id === provider.id) === index);
+  const deduped = all.filter((provider, index, values) => values.findIndex((candidate) => candidate.id === provider.id && candidate.baseUrl === provider.baseUrl && Boolean(candidate.apiKey) === Boolean(provider.apiKey)) === index);
   return deduped.sort((left, right) => (left.priority - right.priority));
 }
 
@@ -231,9 +231,13 @@ function modelMatches(provider: AiProvider, model: string): boolean {
   return provider.models.includes(model) || provider.models.includes(model.split("/").slice(1).join("/"));
 }
 
-function selectProvider(providers: AiProvider[], model: string): AiProvider | null {
+function selectProviders(providers: AiProvider[], model: string): AiProvider[] {
   const requestedProvider = model.includes("/") ? model.split("/", 1)[0] : null;
-  return providers.find((provider) => (!requestedProvider || provider.id === requestedProvider) && modelMatches(provider, model)) || null;
+  return providers.filter((provider) => (!requestedProvider || provider.id === requestedProvider) && modelMatches(provider, model));
+}
+
+function selectProvider(providers: AiProvider[], model: string): AiProvider | null {
+  return selectProviders(providers, model)[0] || null;
 }
 
 function providerModel(model: string, provider: AiProvider): string {
@@ -601,7 +605,7 @@ function autoModelCandidates(providers: AiProvider[]): string[] {
   return requested.filter((model, index, all) => all.indexOf(model) === index && Boolean(selectProvider(providers, model)));
 }
 
-function isRetryableAutoStatus(status: number): boolean {
+function isRetryableProviderStatus(status: number): boolean {
   return status === 401 || status === 402 || status === 403 || status === 408 || status === 429 || status >= 500;
 }
 
@@ -632,34 +636,34 @@ export async function handleAiOnlyChatCompletions(request: Request, dependencies
 
   let lastResponse: Response | null = null;
   for (const model of models) {
-    const provider = selectProvider(providers, model);
-    if (!provider) continue;
-    const upstreamModel = providerModel(model, provider);
-    const endpoint = `${provider.baseUrl}/chat/completions`;
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), MAX_PROVIDER_TIMEOUT_MS);
-    const startedAt = Date.now();
-    try {
-      const upstream = await fetch(endpoint, {
-        method: "POST",
-        headers: upstreamHeaders(provider),
-        body: JSON.stringify({ ...body, model: upstreamModel }),
-        signal: controller.signal,
-      });
-      if (body.stream === true && upstream.ok) {
-        return new Response(upstream.body, { status: upstream.status, headers: { "content-type": upstream.headers.get("content-type") || "text/event-stream", "cache-control": "no-cache", "x-omniroute-provider": provider.id, "x-omniroute-model": model } });
+    const providerCandidates = selectProviders(providers, model);
+    for (const provider of providerCandidates) {
+      const upstreamModel = providerModel(model, provider);
+      const endpoint = `${provider.baseUrl}/chat/completions`;
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), MAX_PROVIDER_TIMEOUT_MS);
+      const startedAt = Date.now();
+      try {
+        const upstream = await fetch(endpoint, {
+          method: "POST",
+          headers: upstreamHeaders(provider),
+          body: JSON.stringify({ ...body, model: upstreamModel }),
+          signal: controller.signal,
+        });
+        if (body.stream === true && upstream.ok) {
+          return new Response(upstream.body, { status: upstream.status, headers: { "content-type": upstream.headers.get("content-type") || "text/event-stream", "cache-control": "no-cache", "x-omniroute-provider": provider.id, "x-omniroute-model": model } });
+        }
+        const responseBody = await upstream.json().catch(() => ({ error: { message: "Provider returned invalid JSON" } }));
+        await recordUsage(provider, model, "chat.completions", upstream.ok ? "succeeded" : "failed", responseBody, policy, startedAt, dependencies);
+        lastResponse = jsonResponse(responseBody, upstream.status, { "x-omniroute-provider": provider.id, "x-omniroute-model": model });
+        if (upstream.ok || !isRetryableProviderStatus(upstream.status)) return lastResponse;
+      } catch (error) {
+        const message = error instanceof Error && error.name === "AbortError" ? "Provider request timed out" : "Provider request failed";
+        await recordUsage(provider, model, "chat.completions", "failed", {}, policy, startedAt, dependencies);
+        lastResponse = errorResponse(504, message, "provider_timeout");
+      } finally {
+        clearTimeout(timeout);
       }
-      const responseBody = await upstream.json().catch(() => ({ error: { message: "Provider returned invalid JSON" } }));
-      await recordUsage(provider, model, "chat.completions", upstream.ok ? "succeeded" : "failed", responseBody, policy, startedAt, dependencies);
-      lastResponse = jsonResponse(responseBody, upstream.status, { "x-omniroute-provider": provider.id, "x-omniroute-model": model });
-      if (upstream.ok || !isAuto || !isRetryableAutoStatus(upstream.status)) return lastResponse;
-    } catch (error) {
-      const message = error instanceof Error && error.name === "AbortError" ? "Provider request timed out" : "Provider request failed";
-      await recordUsage(provider, model, "chat.completions", "failed", {}, policy, startedAt, dependencies);
-      lastResponse = errorResponse(504, message, "provider_timeout");
-      if (!isAuto) return lastResponse;
-    } finally {
-      clearTimeout(timeout);
     }
   }
   return lastResponse || errorResponse(503, "No currently available model can serve this request", "provider_unavailable");
