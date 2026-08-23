@@ -50,17 +50,25 @@ function hashApiKey(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
+function firstEnv(...names: string[]): string {
+  for (const name of names) {
+    const value = process.env[name]?.trim();
+    if (value) return value;
+  }
+  return "";
+}
+
 function envProvider(): AiProvider | null {
-  const id = process.env.OMNIROUTE_AI_PROVIDER_ID?.trim();
-  const baseUrl = process.env.OMNIROUTE_AI_PROVIDER_BASE_URL?.trim();
-  const apiKey = process.env.OMNIROUTE_AI_PROVIDER_API_KEY?.trim();
+  const id = firstEnv("OMNIROUTE_AI_PROVIDER_ID");
+  const baseUrl = firstEnv("OMNIROUTE_AI_PROVIDER_BASE_URL");
+  const apiKey = firstEnv("OMNIROUTE_AI_PROVIDER_API_KEY");
   if (!id || !baseUrl || !apiKey) return null;
   return {
     id,
     baseUrl: baseUrl.replace(/\/+$/, ""),
     apiKey,
-    format: "openai",
-    models: parseModels(process.env.OMNIROUTE_AI_PROVIDER_MODELS || "[]"),
+    format: firstEnv("OMNIROUTE_AI_PROVIDER_FORMAT") || "openai",
+    models: parseModels(firstEnv("OMNIROUTE_AI_PROVIDER_MODELS") || "[]"),
     priority: 0,
   };
 }
@@ -136,6 +144,58 @@ function parseModels(value: unknown): string[] {
   return [];
 }
 
+type BuiltinProviderEnv = {
+  providerId: string;
+  apiKeyNames: string[];
+  baseUrlNames: string[];
+  modelsNames: string[];
+};
+
+const BUILTIN_PROVIDER_ENV: BuiltinProviderEnv[] = [
+  {
+    providerId: "opencode-zen",
+    apiKeyNames: ["OMNIROUTE_OPENCODE_ZEN_API_KEY", "OPENCODE_ZEN_API_KEY", "OPENCODE_API_KEY"],
+    baseUrlNames: ["OMNIROUTE_OPENCODE_ZEN_BASE_URL", "OPENCODE_ZEN_BASE_URL", "OPENCODE_BASE_URL"],
+    modelsNames: ["OMNIROUTE_OPENCODE_ZEN_MODELS", "OPENCODE_ZEN_MODELS", "OPENCODE_MODELS"],
+  },
+  {
+    providerId: "pollinations",
+    apiKeyNames: ["OMNIROUTE_POLLINATIONS_API_KEY", "POLLINATIONS_API_KEY"],
+    baseUrlNames: ["OMNIROUTE_POLLINATIONS_BASE_URL", "POLLINATIONS_BASE_URL"],
+    modelsNames: ["OMNIROUTE_POLLINATIONS_MODELS", "POLLINATIONS_MODELS"],
+  },
+  {
+    providerId: "kilo-gateway",
+    apiKeyNames: ["OMNIROUTE_KILO_API_KEY", "KILO_GATEWAY_API_KEY", "KILO_API_KEY"],
+    baseUrlNames: ["OMNIROUTE_KILO_BASE_URL", "KILO_GATEWAY_BASE_URL", "KILO_BASE_URL"],
+    modelsNames: ["OMNIROUTE_KILO_MODELS", "KILO_GATEWAY_MODELS", "KILO_MODELS"],
+  },
+  {
+    providerId: "g4f-pollinations",
+    apiKeyNames: ["OMNIROUTE_G4F_API_KEY", "G4F_POLLINATIONS_API_KEY", "G4F_API_KEY"],
+    baseUrlNames: ["OMNIROUTE_G4F_BASE_URL", "G4F_POLLINATIONS_BASE_URL", "G4F_BASE_URL"],
+    modelsNames: ["OMNIROUTE_G4F_MODELS", "G4F_POLLINATIONS_MODELS", "G4F_MODELS"],
+  },
+];
+
+function envConfiguredBuiltinProviders(): AiProvider[] {
+  return BUILTIN_PROVIDER_ENV.flatMap((mapping) => {
+    const builtin = BUILTIN_OPTIONAL_PROVIDERS.find((provider) => provider.id === mapping.providerId);
+    const apiKey = firstEnv(...mapping.apiKeyNames);
+    if (!builtin || !apiKey) return [];
+    const baseUrl = firstEnv(...mapping.baseUrlNames) || builtin.baseUrl;
+    const configuredModels = parseModels(firstEnv(...mapping.modelsNames));
+    const models = configuredModels.length ? configuredModels : builtin.models;
+    return [{
+      ...builtin,
+      baseUrl: baseUrl.replace(/\/+$/, ""),
+      apiKey,
+      models,
+      priority: builtin.priority - 1,
+    }];
+  });
+}
+
 function providerFromRecord(record: ProviderConnectionRecord): AiProvider {
   const apiKey = typeof record.credentials.apiKey === "string"
     ? record.credentials.apiKey
@@ -156,7 +216,11 @@ async function listProviders(dependencies: ParadRequestDependencies = {}): Promi
   const records = await listProviderConnections(dependencies);
   const configured = records.map(providerFromRecord).filter((provider) => provider.baseUrl && (provider.apiKey || provider.id === "none"));
   const fallback = envProvider();
-  const all = [...configured, ...(fallback ? [fallback] : []), ...BUILTIN_OPTIONAL_PROVIDERS];
+  const envBuiltins = envConfiguredBuiltinProviders();
+  const configuredIds = new Set(configured.map((provider) => provider.id));
+  const envBuiltinIds = new Set(envBuiltins.map((provider) => provider.id));
+  const builtins = BUILTIN_OPTIONAL_PROVIDERS.filter((provider) => !configuredIds.has(provider.id) && !envBuiltinIds.has(provider.id));
+  const all = [...configured, ...(fallback ? [fallback] : []), ...envBuiltins, ...builtins];
   const deduped = all.filter((provider, index, values) => values.findIndex((candidate) => candidate.id === provider.id) === index);
   return deduped.sort((left, right) => (left.priority - right.priority));
 }
