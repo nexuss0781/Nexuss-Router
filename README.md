@@ -1,0 +1,79 @@
+# OmniRoute Vercel AI Gateway
+
+A lean Vercel-compatible AI gateway profile for OmniRoute using Parad-DB as the request-scoped persistence layer. It exposes OpenAI-compatible AI routes without exposing provider credentials to client applications.
+
+## Single dynamic chat endpoint
+
+Use one endpoint and let the gateway select an available free model dynamically:
+
+```text
+POST /api/v1/chat/completions
+```
+
+Set `model` to `auto`, or omit it:
+
+```json
+{
+  "model": "auto",
+  "messages": [{"role": "user", "content": "Hello"}]
+}
+```
+
+The current auto-selection candidates are tried in order:
+
+```text
+opencode-zen/laguna-s-2.1-free
+opencode-zen/nemotron-3.5-lightning-free
+opencode-zen/nemotron-3-ultra-free
+opencode-zen/hy3-free
+opencode-zen/mimo-v2.5-free
+opencode-zen/big-pickle
+```
+
+The response includes `x-omniroute-provider` and `x-omniroute-model` headers showing the route selected. Explicit model IDs continue to use only the requested model.
+
+## Client setup
+
+```ts
+import OpenAI from "openai";
+
+const client = new OpenAI({
+  baseURL: `${process.env.OMNIROUTE_BASE_URL}/api/v1`,
+  apiKey: process.env.OMNIROUTE_GATEWAY_KEY,
+});
+
+const response = await client.chat.completions.create({
+  model: "auto",
+  messages: [{ role: "user", content: "Hello" }],
+});
+```
+
+## Required deployment variables
+
+Set these in Vercel. Never commit their values:
+
+```text
+DATABASE_URL
+OMNIROUTE_AI_API_KEY
+OMNIROUTE_VERCEL_PROFILE=ai-only
+```
+
+Optional provider variables can be added when the corresponding server-side integration is configured. Provider keys must remain in Vercel environment variables or Parad provider records, never in browser code.
+
+## Deploy
+
+```bash
+npm install
+npm run build
+vercel --prod
+```
+
+This project uses sql.js’s asm.js fallback in the Vercel AI-only build to avoid relying on a runtime WASM filesystem asset. The original OmniRoute Docker/SQLite deployment path is not modified by this lean profile.
+
+## Routes
+
+The workspace includes AI-only handlers for chat completions, completions, responses, messages, models, embeddings, rerank, classify, segment, moderations, search, web fetch, images, audio, video, music, OCR, files, batches/jobs, provider paths, and the Gemini-compatible beta path. Long-running media operations use the asynchronous jobs pattern.
+
+## Verification
+
+The included test scripts exercise the deployed gateway and model catalog. They expect the gateway key to be supplied through a local secret file or environment, not committed to the repository.

@@ -1,0 +1,4 @@
+import { multipartRoute } from "@/lib/aiRoute";
+export const runtime = "nodejs";
+export const maxDuration = 300;
+export const POST = multipartRoute("audio/transcriptions", { requireModel: true, maxBytes: 4 * 1024 * 1024 });

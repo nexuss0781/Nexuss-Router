@@ -1,0 +1,602 @@
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
+import type { ParadRequestDependencies } from "@/lib/vercel-parad/index.ts";
+import {
+  listApiKeyPolicies,
+  listProviderConnections,
+  listModelOverrides,
+  createAiFile,
+  listAiFiles,
+  getAiFile,
+  deleteAiFile,
+  createAiJob,
+  getAiJob,
+  listAiJobs,
+  updateAiJob,
+  recordAiUsageEvent,
+  type AiApiKeyPolicy,
+  type ProviderConnectionRecord,
+} from "./repositories.ts";
+
+const MAX_CHAT_BODY_BYTES = 4 * 1024 * 1024;
+const MAX_PROVIDER_TIMEOUT_MS = 240_000;
+
+export type AiProvider = {
+  id: string;
+  baseUrl: string;
+  apiKey: string;
+  format: string;
+  models: string[];
+  priority: number;
+};
+
+function jsonResponse(body: unknown, status = 200, headers: Record<string, string> = {}) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "content-type": "application/json", ...headers },
+  });
+}
+
+function errorResponse(status: number, message: string, code = "invalid_request_error") {
+  return jsonResponse({ error: { message, type: status >= 500 ? "server_error" : "invalid_request_error", code } }, status);
+}
+
+function constantTimeEqual(left: string, right: string): boolean {
+  const a = Buffer.from(left);
+  const b = Buffer.from(right);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+function hashApiKey(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function envProvider(): AiProvider | null {
+  const id = process.env.OMNIROUTE_AI_PROVIDER_ID?.trim();
+  const baseUrl = process.env.OMNIROUTE_AI_PROVIDER_BASE_URL?.trim();
+  const apiKey = process.env.OMNIROUTE_AI_PROVIDER_API_KEY?.trim();
+  if (!id || !baseUrl || !apiKey) return null;
+  return {
+    id,
+    baseUrl: baseUrl.replace(/\/+$/, ""),
+    apiKey,
+    format: "openai",
+    models: parseModels(process.env.OMNIROUTE_AI_PROVIDER_MODELS || "[]"),
+    priority: 0,
+  };
+}
+
+const BUILTIN_OPTIONAL_PROVIDERS: AiProvider[] = [
+  {
+    id: "opencode-zen",
+    baseUrl: "https://opencode.ai/zen/v1",
+    apiKey: "",
+    format: "openai",
+    priority: 1000,
+    models: [
+      "big-pickle",
+      "deepseek-v4-flash-free",
+      "mimo-v2.5-free",
+      "hy3-free",
+      "nemotron-3-ultra-free",
+      "nemotron-3.5-lightning-free",
+      "laguna-s-2.1-free",
+    ],
+  },
+  {
+    id: "pollinations",
+    baseUrl: "https://gen.pollinations.ai/v1",
+    apiKey: "",
+    format: "openai",
+    priority: 990,
+    models: [
+      "openai",
+      "openai-fast",
+      "openai-large",
+      "qwen-coder",
+      "mistral",
+      "deepseek",
+      "grok",
+      "gemini-flash-lite-3.1",
+      "perplexity-fast",
+      "perplexity-reasoning",
+    ],
+  },
+  {
+    id: "kilo-gateway",
+    baseUrl: "https://api.kilo.ai/api/gateway",
+    apiKey: "",
+    format: "openai",
+    priority: 980,
+    models: [
+      "kilo-auto/free",
+      "nvidia/nemotron-3-super-120b-a12b:free",
+      "minimax/minimax-m2.5:free",
+      "arcee-ai/trinity-large-preview:free",
+    ],
+  },
+  {
+    id: "g4f-pollinations",
+    baseUrl: "https://g4f.space/api/pollinations/v1",
+    apiKey: "",
+    format: "openai",
+    priority: 970,
+    models: ["openai", "openai-fast"],
+  },
+];
+
+function parseModels(value: unknown): string[] {
+  if (Array.isArray(value)) return value.filter((item): item is string => typeof item === "string" && Boolean(item.trim())).map((item) => item.trim());
+  if (typeof value === "string") {
+    try {
+      return parseModels(JSON.parse(value));
+    } catch {
+      return value.split(",").map((item) => item.trim()).filter(Boolean);
+    }
+  }
+  return [];
+}
+
+function providerFromRecord(record: ProviderConnectionRecord): AiProvider {
+  const apiKey = typeof record.credentials.apiKey === "string"
+    ? record.credentials.apiKey
+    : typeof record.credentials.api_key === "string"
+      ? record.credentials.api_key
+      : "";
+  return {
+    id: record.providerId || record.id,
+    baseUrl: record.baseUrl.replace(/\/+$/, ""),
+    apiKey,
+    format: record.format,
+    models: record.models,
+    priority: record.priority ?? 0,
+  };
+}
+
+async function listProviders(dependencies: ParadRequestDependencies = {}): Promise<AiProvider[]> {
+  const records = await listProviderConnections(dependencies);
+  const configured = records.map(providerFromRecord).filter((provider) => provider.baseUrl && (provider.apiKey || provider.id === "none"));
+  const fallback = envProvider();
+  const all = [...configured, ...(fallback ? [fallback] : []), ...BUILTIN_OPTIONAL_PROVIDERS];
+  const deduped = all.filter((provider, index, values) => values.findIndex((candidate) => candidate.id === provider.id) === index);
+  return deduped.sort((left, right) => (left.priority - right.priority));
+}
+
+function modelMatches(provider: AiProvider, model: string): boolean {
+  if (model.startsWith("auto")) return true;
+  if (!provider.models.length) return true;
+  return provider.models.includes(model) || provider.models.includes(model.split("/").slice(1).join("/"));
+}
+
+function selectProvider(providers: AiProvider[], model: string): AiProvider | null {
+  const requestedProvider = model.includes("/") ? model.split("/", 1)[0] : null;
+  return providers.find((provider) => (!requestedProvider || provider.id === requestedProvider) && modelMatches(provider, model)) || null;
+}
+
+function providerModel(model: string, provider: AiProvider): string {
+  if (!model.startsWith("auto/") && model.includes("/")) {
+    const prefix = model.split("/", 1)[0];
+    if (prefix === provider.id) return model.slice(prefix.length + 1);
+  }
+  return model.startsWith("auto") && provider.models.length ? provider.models[0] : model;
+}
+
+function extractUsage(payload: any): { inputTokens: number | null; outputTokens: number | null } {
+  const usage = payload?.usage || {};
+  return {
+    inputTokens: Number.isFinite(Number(usage.prompt_tokens ?? usage.input_tokens)) ? Number(usage.prompt_tokens ?? usage.input_tokens) : null,
+    outputTokens: Number.isFinite(Number(usage.completion_tokens ?? usage.output_tokens)) ? Number(usage.completion_tokens ?? usage.output_tokens) : null,
+  };
+}
+
+async function authenticateGatewayRequest(
+  request: Request,
+  dependencies: ParadRequestDependencies,
+): Promise<{ policy: AiApiKeyPolicy | null; response: Response | null }> {
+  const authorization = request.headers.get("authorization") || "";
+  const match = /^Bearer\s+(.+)$/i.exec(authorization);
+  const supplied = match?.[1].trim() || "";
+  const expected = process.env.OMNIROUTE_AI_API_KEY?.trim();
+  if (expected && supplied && constantTimeEqual(supplied, expected)) return { policy: null, response: null };
+  if (!supplied) return { policy: null, response: errorResponse(401, "Invalid or missing API key", "invalid_api_key") };
+
+  const policies = await listApiKeyPolicies(dependencies);
+  const policy = policies.find((candidate) => constantTimeEqual(candidate.keyHash, hashApiKey(supplied)));
+  if (!policy) return { policy: null, response: errorResponse(401, "Invalid or missing API key", "invalid_api_key") };
+  if (policy.expiresAt && Date.parse(policy.expiresAt) <= Date.now()) return { policy: null, response: errorResponse(401, "API key has expired", "expired_api_key") };
+  return { policy, response: null };
+}
+
+function policyAllows(policy: AiApiKeyPolicy | null, endpoint: string, model: string): Response | null {
+  if (!policy) return null;
+  if (policy.allowedEndpoints.length && !policy.allowedEndpoints.includes(endpoint)) return errorResponse(403, "API key is not permitted to use this endpoint", "endpoint_not_allowed");
+  if (policy.allowedModels.length && !model.startsWith("auto") && !policy.allowedModels.includes(model)) return errorResponse(403, "API key is not permitted to use this model", "model_not_allowed");
+  return null;
+}
+
+async function recordUsage(provider: AiProvider, model: string, endpoint: string, status: string, payload: any, policy: AiApiKeyPolicy | null, startedAt: number, dependencies: ParadRequestDependencies) {
+  const { inputTokens, outputTokens } = extractUsage(payload);
+  await recordAiUsageEvent({
+    id: randomUUID(),
+    apiKeyId: policy?.id ?? null,
+    providerId: provider.id,
+    model,
+    endpoint,
+    status,
+    inputTokens,
+    outputTokens,
+    latencyMs: Date.now() - startedAt,
+  }, dependencies).catch(() => undefined);
+}
+
+export async function getAiOnlyModels(request: Request, dependencies: ParadRequestDependencies = {}) {
+  const { response } = await authenticateGatewayRequest(request, dependencies);
+  if (response) return response;
+  const providers = await listProviders(dependencies);
+  const overrides = await listModelOverrides(dependencies);
+  const data = providers.flatMap((provider) => provider.models.map((id) => ({ id: id.includes("/") ? id : `${provider.id}/${id}`, object: "model", owned_by: provider.id })))
+    .concat(overrides.map((override) => ({ id: `${override.providerId}/${override.modelId}`, object: "model", owned_by: override.providerId, ...(override.displayName ? { name: override.displayName } : {}), ...override.capabilities })))
+    .filter((item, index, all) => all.findIndex((candidate) => candidate.id === item.id) === index);
+  return jsonResponse({ object: "list", data });
+}
+
+export type AiJsonEndpointOptions = {
+  providerId?: string;
+  upstreamPath?: string;
+  endpointName?: string;
+  requireModel?: boolean;
+  streamResponse?: boolean;
+  binaryResponse?: boolean;
+};
+
+function upstreamHeaders(provider: AiProvider): Record<string, string> {
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  if (provider.apiKey) headers.authorization = `Bearer ${provider.apiKey}`;
+  if (provider.id === "opencode-zen") {
+    headers["user-agent"] = process.env.OPENCODE_USER_AGENT?.trim() || "opencode";
+    headers["x-opencode-client"] = process.env.OPENCODE_CLIENT?.trim() || "desktop";
+    headers["x-opencode-project"] = process.env.OPENCODE_PROJECT?.trim() || "global";
+    headers["x-opencode-request"] = randomUUID();
+    headers["x-opencode-session"] = randomUUID();
+  }
+  if (provider.format.toLowerCase().includes("claude") || provider.format.toLowerCase().includes("anthropic")) {
+    delete headers.authorization;
+    headers["x-api-key"] = provider.apiKey;
+    headers["anthropic-version"] = "2023-06-01";
+  }
+  return headers;
+}
+
+function bodyModel(body: any): string {
+  return typeof body?.model === "string" && body.model.trim() ? body.model.trim() : "auto";
+}
+
+export async function handleAiOnlyJsonEndpoint(
+  request: Request,
+  endpoint: string,
+  dependencies: ParadRequestDependencies = {},
+  options: AiJsonEndpointOptions = {},
+) {
+  const { policy, response: authFailure } = await authenticateGatewayRequest(request, dependencies);
+  if (authFailure) return authFailure;
+  if (request.method !== "POST") return errorResponse(405, "Method not allowed", "method_not_allowed");
+  const contentType = request.headers.get("content-type") || "";
+  if (!contentType.toLowerCase().startsWith("application/json")) return errorResponse(415, "Content-Type must be application/json", "unsupported_media_type");
+  const raw = Buffer.from(await request.arrayBuffer());
+  if (raw.length > MAX_CHAT_BODY_BYTES) return errorResponse(413, "Request body exceeds the 4 MiB AI profile limit", "payload_too_large");
+  let body: any;
+  try {
+    body = JSON.parse(raw.toString("utf8"));
+  } catch {
+    return errorResponse(400, "Request body must be valid JSON");
+  }
+  if (!body || typeof body !== "object" || Array.isArray(body)) return errorResponse(400, "Request body must be a JSON object");
+  const model = bodyModel(body);
+  if (options.requireModel && model === "auto") return errorResponse(400, "model must be a non-empty string");
+  const policyFailure = policyAllows(policy, options.endpointName || endpoint, model);
+  if (policyFailure) return policyFailure;
+  const providers = await listProviders(dependencies);
+  const provider = options.providerId ? providers.find((candidate) => candidate.id === options.providerId) : selectProvider(providers, model);
+  if (!provider) return errorResponse(503, options.providerId ? `No configured provider ${options.providerId}` : `No configured provider can serve model ${model}`, "provider_unavailable");
+  if (options.providerId && model !== "auto" && model.includes("/")) {
+    const prefix = model.split("/", 1)[0];
+    if (prefix !== provider.id) return errorResponse(400, `Model "${model}" does not belong to provider "${provider.id}"`, "model_provider_mismatch");
+  }
+  const upstreamModel = model === "auto" ? model : providerModel(model, provider);
+  const upstreamBody = model === "auto" || typeof body.model !== "string" ? body : { ...body, model: upstreamModel };
+  const upstreamPath = (options.upstreamPath || endpoint).replace(/^\/+|\/+$/g, "");
+  const upstreamUrl = `${provider.baseUrl}/${upstreamPath}`;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), MAX_PROVIDER_TIMEOUT_MS);
+  const startedAt = Date.now();
+  try {
+    const upstream = await fetch(upstreamUrl, { method: "POST", headers: upstreamHeaders(provider), body: JSON.stringify(upstreamBody), signal: controller.signal });
+    if (options.streamResponse || body.stream === true) return new Response(upstream.body, { status: upstream.status, headers: { "content-type": upstream.headers.get("content-type") || "text/event-stream", "cache-control": "no-cache", "x-omniroute-provider": provider.id } });
+    if (options.binaryResponse) {
+      const bytes = await upstream.arrayBuffer();
+      await recordUsage(provider, model, options.endpointName || endpoint, upstream.ok ? "succeeded" : "failed", {}, policy, startedAt, dependencies);
+      return new Response(bytes, { status: upstream.status, headers: { "content-type": upstream.headers.get("content-type") || "application/octet-stream", "x-omniroute-provider": provider.id } });
+    }
+    const responseBody = await upstream.json().catch(() => ({ error: { message: "Provider returned invalid JSON" } }));
+    await recordUsage(provider, model, options.endpointName || endpoint, upstream.ok ? "succeeded" : "failed", responseBody, policy, startedAt, dependencies);
+    return jsonResponse(responseBody, upstream.status, { "x-omniroute-provider": provider.id });
+  } catch (error) {
+    const message = error instanceof Error && error.name === "AbortError" ? "Provider request timed out" : "Provider request failed";
+    await recordUsage(provider, model, options.endpointName || endpoint, "failed", {}, policy, startedAt, dependencies);
+    return errorResponse(504, message, "provider_timeout");
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+export type AiMultipartEndpointOptions = {
+  providerId?: string;
+  upstreamPath?: string;
+  endpointName?: string;
+  maxBytes?: number;
+  requireModel?: boolean;
+};
+
+export async function handleAiOnlyMultipartEndpoint(
+  request: Request,
+  endpoint: string,
+  dependencies: ParadRequestDependencies = {},
+  options: AiMultipartEndpointOptions = {},
+) {
+  const { policy, response: authFailure } = await authenticateGatewayRequest(request, dependencies);
+  if (authFailure) return authFailure;
+  if (request.method !== "POST") return errorResponse(405, "Method not allowed", "method_not_allowed");
+  const contentType = request.headers.get("content-type") || "";
+  if (!contentType.toLowerCase().startsWith("multipart/form-data")) return errorResponse(415, "Content-Type must be multipart/form-data", "unsupported_media_type");
+  const raw = Buffer.from(await request.arrayBuffer());
+  const maxBytes = options.maxBytes ?? 4 * 1024 * 1024;
+  if (raw.length > maxBytes) return errorResponse(413, `Multipart request exceeds the ${Math.floor(maxBytes / (1024 * 1024))} MiB AI profile limit`, "payload_too_large");
+  const form = new FormData();
+  const source = await new Request(request.url, { method: "POST", headers: { "content-type": contentType }, body: raw }).formData();
+  let model = "auto";
+  for (const [key, value] of source.entries()) {
+    if (key === "model" && typeof value === "string") model = value.trim() || "auto";
+    if (typeof value === "string") form.append(key, value);
+    else form.append(key, value, value.name);
+  }
+  if (options.requireModel && model === "auto") return errorResponse(400, "model must be a non-empty string");
+  const policyFailure = policyAllows(policy, options.endpointName || endpoint, model);
+  if (policyFailure) return policyFailure;
+  const providers = await listProviders(dependencies);
+  const provider = options.providerId ? providers.find((candidate) => candidate.id === options.providerId) : selectProvider(providers, model);
+  if (!provider) return errorResponse(503, options.providerId ? `No configured provider ${options.providerId}` : `No configured provider can serve model ${model}`, "provider_unavailable");
+  const upstreamPath = (options.upstreamPath || endpoint).replace(/^\/+|\/+$/g, "");
+  const upstreamUrl = `${provider.baseUrl}/${upstreamPath}`;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), MAX_PROVIDER_TIMEOUT_MS);
+  const startedAt = Date.now();
+  try {
+    const upstream = await fetch(upstreamUrl, { method: "POST", headers: provider.apiKey ? { authorization: `Bearer ${provider.apiKey}` } : {}, body: form, signal: controller.signal });
+    const responseBody = await upstream.json().catch(() => ({ error: { message: "Provider returned invalid JSON" } }));
+    await recordUsage(provider, model, options.endpointName || endpoint, upstream.ok ? "succeeded" : "failed", responseBody, policy, startedAt, dependencies);
+    return jsonResponse(responseBody, upstream.status, { "x-omniroute-provider": provider.id });
+  } catch (error) {
+    const message = error instanceof Error && error.name === "AbortError" ? "Provider request timed out" : "Provider request failed";
+    await recordUsage(provider, model, options.endpointName || endpoint, "failed", {}, policy, startedAt, dependencies);
+    return errorResponse(504, message, "provider_timeout");
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function fileMetadata(file: { id: string; bytes: number; filename: string; purpose: string; mimeType?: string | null; expiresAt?: string | null; createdAt: string }) {
+  return { id: file.id, object: "file", bytes: file.bytes, created_at: Math.floor(Date.parse(file.createdAt) / 1000), filename: file.filename, purpose: file.purpose, status: "processed", status_details: null, ...(file.mimeType ? { mime_type: file.mimeType } : {}), ...(file.expiresAt ? { expires_at: Math.floor(Date.parse(file.expiresAt) / 1000) } : {}) };
+}
+
+export async function handleAiOnlyFileUpload(request: Request, dependencies: ParadRequestDependencies = {}) {
+  const { policy, response: authFailure } = await authenticateGatewayRequest(request, dependencies);
+  if (authFailure) return authFailure;
+  if (request.method !== "POST") return errorResponse(405, "Method not allowed", "method_not_allowed");
+  const raw = Buffer.from(await request.arrayBuffer());
+  if (raw.length > 4 * 1024 * 1024) return errorResponse(413, "File upload exceeds the 4 MiB AI profile limit; use an external object-storage reference for larger files", "payload_too_large");
+  const contentType = request.headers.get("content-type") || "";
+  if (!contentType.toLowerCase().startsWith("multipart/form-data")) return errorResponse(415, "Content-Type must be multipart/form-data", "unsupported_media_type");
+  const form = await new Request(request.url, { method: "POST", headers: { "content-type": contentType }, body: raw }).formData().catch(() => null);
+  const file = form?.get("file");
+  const purpose = form?.get("purpose");
+  if (!(file instanceof File) || typeof purpose !== "string" || !purpose.trim()) return errorResponse(400, "Missing file or purpose");
+  const content = new Uint8Array(await file.arrayBuffer());
+  const id = `file-${randomUUID()}`;
+  await createAiFile({ id, apiKeyId: policy?.id ?? null, bytes: file.size, filename: file.name, purpose: purpose.trim(), mimeType: file.type || null, content }, dependencies);
+  return jsonResponse(fileMetadata({ id, bytes: file.size, filename: file.name, purpose: purpose.trim(), mimeType: file.type || null, createdAt: new Date().toISOString() }));
+}
+
+export async function handleAiOnlyFileList(request: Request, dependencies: ParadRequestDependencies = {}) {
+  const { policy, response: authFailure } = await authenticateGatewayRequest(request, dependencies);
+  if (authFailure) return authFailure;
+  if (request.method !== "GET") return errorResponse(405, "Method not allowed", "method_not_allowed");
+  const files = await listAiFiles(policy?.id ?? null, dependencies);
+  const data = files.map(fileMetadata);
+  return jsonResponse({ object: "list", data, has_more: false });
+}
+
+export async function handleAiOnlyFileMetadata(request: Request, id: string, dependencies: ParadRequestDependencies = {}) {
+  const { policy, response: authFailure } = await authenticateGatewayRequest(request, dependencies);
+  if (authFailure) return authFailure;
+  if (request.method !== "GET") return errorResponse(405, "Method not allowed", "method_not_allowed");
+  const file = await getAiFile(id, policy?.id ?? null, dependencies);
+  if (!file) return errorResponse(404, "File not found", "file_not_found");
+  return jsonResponse(fileMetadata(file));
+}
+
+export async function handleAiOnlyFileContent(request: Request, id: string, dependencies: ParadRequestDependencies = {}) {
+  const { policy, response: authFailure } = await authenticateGatewayRequest(request, dependencies);
+  if (authFailure) return authFailure;
+  if (request.method !== "GET") return errorResponse(405, "Method not allowed", "method_not_allowed");
+  const file = await getAiFile(id, policy?.id ?? null, dependencies);
+  if (!file) return errorResponse(404, "File not found", "file_not_found");
+  return new Response(file.content, { headers: { "content-type": file.mimeType || "application/octet-stream", "content-disposition": `attachment; filename="${file.filename.replace(/[\"\\\r\n]/g, "_")}"` } });
+}
+
+export async function handleAiOnlyFileDelete(request: Request, id: string, dependencies: ParadRequestDependencies = {}) {
+  const { policy, response: authFailure } = await authenticateGatewayRequest(request, dependencies);
+  if (authFailure) return authFailure;
+  if (request.method !== "DELETE") return errorResponse(405, "Method not allowed", "method_not_allowed");
+  const deleted = await deleteAiFile(id, policy?.id ?? null, dependencies);
+  if (!deleted) return errorResponse(404, "File not found", "file_not_found");
+  return jsonResponse({ id, object: "file", deleted: true });
+}
+
+function jobResponse(job: any) {
+  return { id: job.id, object: job.kind === "batch" ? "batch" : "ai_job", kind: job.kind, status: job.status, request: job.request, result: job.result ?? null, error: job.error ?? null, callback_url: job.callbackUrl ?? null, attempts: job.attempts, created_at: job.createdAt, started_at: job.startedAt ?? null, finished_at: job.finishedAt ?? null };
+}
+
+async function dispatchAiJob(job: any) {
+  const dispatchUrl = process.env.OMNIROUTE_JOB_DISPATCH_URL?.trim();
+  if (!dispatchUrl) return;
+  const secret = process.env.OMNIROUTE_JOB_DISPATCH_SECRET?.trim();
+  await fetch(dispatchUrl, { method: "POST", headers: { "content-type": "application/json", ...(secret ? { "x-omniroute-job-secret": secret } : {}) }, body: JSON.stringify({ id: job.id, kind: job.kind }) }).catch(() => undefined);
+}
+
+export async function handleAiJobCreate(request: Request, kind: string, dependencies: ParadRequestDependencies = {}) {
+  const { policy, response: authFailure } = await authenticateGatewayRequest(request, dependencies);
+  if (authFailure) return authFailure;
+  if (request.method !== "POST") return errorResponse(405, "Method not allowed", "method_not_allowed");
+  const raw = Buffer.from(await request.arrayBuffer());
+  if (raw.length > MAX_CHAT_BODY_BYTES) return errorResponse(413, "Job request exceeds the 4 MiB AI profile limit", "payload_too_large");
+  let body: any;
+  try { body = JSON.parse(raw.toString("utf8")); } catch { return errorResponse(400, "Request body must be valid JSON"); }
+  if (!body || typeof body !== "object" || Array.isArray(body)) return errorResponse(400, "Request body must be a JSON object");
+  const callbackUrl = typeof body.callback_url === "string" && /^https:\/\//i.test(body.callback_url) ? body.callback_url : null;
+  const id = `job-${randomUUID()}`;
+  await createAiJob({ id, apiKeyId: policy?.id ?? null, kind, request: body, callbackUrl }, dependencies);
+  const job = { id, kind, status: "queued", request: body, callbackUrl, attempts: 0, createdAt: new Date().toISOString(), startedAt: null, finishedAt: null, result: null, error: null };
+  void dispatchAiJob(job);
+  return jsonResponse(jobResponse(job), 202, { "x-omniroute-job-id": id });
+}
+
+export async function handleAiJobList(request: Request, dependencies: ParadRequestDependencies = {}) {
+  const { policy, response: authFailure } = await authenticateGatewayRequest(request, dependencies);
+  if (authFailure) return authFailure;
+  if (request.method !== "GET") return errorResponse(405, "Method not allowed", "method_not_allowed");
+  const jobs = await listAiJobs(policy?.id ?? null, 100, dependencies);
+  return jsonResponse({ object: "list", data: jobs.map(jobResponse), has_more: false });
+}
+
+export async function handleAiJobGet(request: Request, id: string, dependencies: ParadRequestDependencies = {}) {
+  const { policy, response: authFailure } = await authenticateGatewayRequest(request, dependencies);
+  if (authFailure) return authFailure;
+  if (request.method !== "GET") return errorResponse(405, "Method not allowed", "method_not_allowed");
+  const job = await getAiJob(id, policy?.id ?? null, dependencies);
+  if (!job) return errorResponse(404, "Job not found", "job_not_found");
+  return jsonResponse(jobResponse(job));
+}
+
+export async function handleAiJobCancel(request: Request, id: string, dependencies: ParadRequestDependencies = {}) {
+  const { policy, response: authFailure } = await authenticateGatewayRequest(request, dependencies);
+  if (authFailure) return authFailure;
+  if (request.method !== "POST") return errorResponse(405, "Method not allowed", "method_not_allowed");
+  const job = await getAiJob(id, policy?.id ?? null, dependencies);
+  if (!job) return errorResponse(404, "Job not found", "job_not_found");
+  if (["completed", "failed", "cancelled", "expired"].includes(job.status)) return jsonResponse(jobResponse(job), 409);
+  await updateAiJob(id, policy?.id ?? null, { status: "cancelled", cancelRequested: true, finishedAt: new Date().toISOString() }, dependencies);
+  return jsonResponse(jobResponse({ ...job, status: "cancelled", cancelRequested: true, finishedAt: new Date().toISOString() }));
+}
+
+export async function handleAiJobRetry(request: Request, id: string, dependencies: ParadRequestDependencies = {}) {
+  const { policy, response: authFailure } = await authenticateGatewayRequest(request, dependencies);
+  if (authFailure) return authFailure;
+  if (request.method !== "POST") return errorResponse(405, "Method not allowed", "method_not_allowed");
+  const job = await getAiJob(id, policy?.id ?? null, dependencies);
+  if (!job) return errorResponse(404, "Job not found", "job_not_found");
+  if (!["failed", "cancelled", "expired"].includes(job.status)) return jsonResponse(jobResponse(job), 409);
+  const next = { ...job, status: "queued", attempts: job.attempts + 1, error: null, result: null, cancelRequested: false, availableAt: new Date().toISOString(), startedAt: null, finishedAt: null };
+  await updateAiJob(id, policy?.id ?? null, next, dependencies);
+  void dispatchAiJob(next);
+  return jsonResponse(jobResponse(next), 202);
+}
+
+export async function handleAiJobComplete(request: Request, id: string, dependencies: ParadRequestDependencies = {}) {
+  const expected = process.env.OMNIROUTE_JOB_CALLBACK_SECRET?.trim();
+  if (!expected || request.headers.get("x-omniroute-job-secret") !== expected) return errorResponse(401, "Invalid job worker secret", "invalid_worker_secret");
+  if (request.method !== "POST") return errorResponse(405, "Method not allowed", "method_not_allowed");
+  const body = await request.json().catch(() => null) as any;
+  if (!body || !["completed", "failed"].includes(body.status)) return errorResponse(400, "status must be completed or failed");
+  const job = await getAiJob(id, null, dependencies);
+  if (!job) return errorResponse(404, "Job not found", "job_not_found");
+  await updateAiJob(id, null, { status: body.status, result: body.result ?? null, error: body.error ?? null, finishedAt: new Date().toISOString() }, dependencies);
+  return jsonResponse({ ok: true, id, status: body.status });
+}
+
+const DEFAULT_AUTO_MODELS = [
+  "opencode-zen/laguna-s-2.1-free",
+  "opencode-zen/nemotron-3.5-lightning-free",
+  "opencode-zen/nemotron-3-ultra-free",
+  "opencode-zen/hy3-free",
+  "opencode-zen/mimo-v2.5-free",
+  "opencode-zen/big-pickle",
+];
+
+function autoModelCandidates(providers: AiProvider[]): string[] {
+  const configured = parseModels(process.env.OMNIROUTE_AI_AUTO_MODELS || "");
+  const requested = configured.length ? configured : DEFAULT_AUTO_MODELS;
+  return requested.filter((model, index, all) => all.indexOf(model) === index && Boolean(selectProvider(providers, model)));
+}
+
+function isRetryableAutoStatus(status: number): boolean {
+  return status === 401 || status === 402 || status === 403 || status === 408 || status === 429 || status >= 500;
+}
+
+export async function handleAiOnlyChatCompletions(request: Request, dependencies: ParadRequestDependencies = {}) {
+  const { policy, response: authFailure } = await authenticateGatewayRequest(request, dependencies);
+  if (authFailure) return authFailure;
+  if (request.method !== "POST") return errorResponse(405, "Method not allowed", "method_not_allowed");
+  const contentType = request.headers.get("content-type") || "";
+  if (!contentType.toLowerCase().startsWith("application/json")) return errorResponse(415, "Content-Type must be application/json", "unsupported_media_type");
+  const raw = Buffer.from(await request.arrayBuffer());
+  if (raw.length > MAX_CHAT_BODY_BYTES) return errorResponse(413, "Request body exceeds the 4 MiB AI profile limit", "payload_too_large");
+  let body: any;
+  try {
+    body = JSON.parse(raw.toString("utf8"));
+  } catch {
+    return errorResponse(400, "Request body must be valid JSON");
+  }
+  if (!body || typeof body !== "object" || !Array.isArray(body.messages) || body.messages.length === 0) return errorResponse(400, "messages must be a non-empty array");
+  if (body.model !== undefined && typeof body.model !== "string") return errorResponse(400, "model must be a string");
+
+  const requestedModel = body.model?.trim() || "auto";
+  const isAuto = requestedModel === "auto" || requestedModel === "auto/free";
+  const policyFailure = policyAllows(policy, "chat.completions", requestedModel);
+  if (policyFailure) return policyFailure;
+  const providers = await listProviders(dependencies);
+  const models = isAuto ? autoModelCandidates(providers) : [requestedModel];
+  if (!models.length) return errorResponse(503, "No currently available model can serve this request", "provider_unavailable");
+
+  let lastResponse: Response | null = null;
+  for (const model of models) {
+    const provider = selectProvider(providers, model);
+    if (!provider) continue;
+    const upstreamModel = providerModel(model, provider);
+    const endpoint = `${provider.baseUrl}/chat/completions`;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), MAX_PROVIDER_TIMEOUT_MS);
+    const startedAt = Date.now();
+    try {
+      const upstream = await fetch(endpoint, {
+        method: "POST",
+        headers: upstreamHeaders(provider),
+        body: JSON.stringify({ ...body, model: upstreamModel }),
+        signal: controller.signal,
+      });
+      if (body.stream === true && upstream.ok) {
+        return new Response(upstream.body, { status: upstream.status, headers: { "content-type": upstream.headers.get("content-type") || "text/event-stream", "cache-control": "no-cache", "x-omniroute-provider": provider.id, "x-omniroute-model": model } });
+      }
+      const responseBody = await upstream.json().catch(() => ({ error: { message: "Provider returned invalid JSON" } }));
+      await recordUsage(provider, model, "chat.completions", upstream.ok ? "succeeded" : "failed", responseBody, policy, startedAt, dependencies);
+      lastResponse = jsonResponse(responseBody, upstream.status, { "x-omniroute-provider": provider.id, "x-omniroute-model": model });
+      if (upstream.ok || !isAuto || !isRetryableAutoStatus(upstream.status)) return lastResponse;
+    } catch (error) {
+      const message = error instanceof Error && error.name === "AbortError" ? "Provider request timed out" : "Provider request failed";
+      await recordUsage(provider, model, "chat.completions", "failed", {}, policy, startedAt, dependencies);
+      lastResponse = errorResponse(504, message, "provider_timeout");
+      if (!isAuto) return lastResponse;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+  return lastResponse || errorResponse(503, "No currently available model can serve this request", "provider_unavailable");
+}
