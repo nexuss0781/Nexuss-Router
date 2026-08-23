@@ -97,7 +97,6 @@ const BUILTIN_OPTIONAL_PROVIDERS: AiProvider[] = [
     format: "openai",
     priority: 990,
     models: [
-      "openai",
       "openai-fast",
       "openai-large",
       "qwen-coder",
@@ -124,7 +123,7 @@ const BUILTIN_OPTIONAL_PROVIDERS: AiProvider[] = [
   },
   {
     id: "g4f-pollinations",
-    baseUrl: "https://g4f.space/api/pollinations/v1",
+    baseUrl: "https://g4f.space/v1",
     apiKey: "",
     format: "openai",
     priority: 970,
@@ -178,23 +177,49 @@ const BUILTIN_PROVIDER_ENV: BuiltinProviderEnv[] = [
   },
 ];
 
-function envConfiguredBuiltinProviders(): AiProvider[] {
-  return BUILTIN_PROVIDER_ENV.flatMap((mapping) => {
+async function discoverG4fModels(baseUrl: string, apiKey: string): Promise<string[]> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 8_000);
+  try {
+    const response = await fetch(`${baseUrl}/models`, {
+      headers: { authorization: `Bearer ${apiKey}` },
+      signal: controller.signal,
+    });
+    if (!response.ok) return [];
+    const payload = await response.json().catch(() => null) as { data?: unknown } | null;
+    if (!Array.isArray(payload?.data)) return [];
+    return payload.data
+      .map((item) => typeof item === "string" ? item : (item && typeof item === "object" && "id" in item && typeof item.id === "string" ? item.id : ""))
+      .filter(Boolean)
+      .slice(0, 1_000);
+  } catch {
+    return [];
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function envConfiguredBuiltinProviders(): Promise<AiProvider[]> {
+  const providers = await Promise.all(BUILTIN_PROVIDER_ENV.map(async (mapping) => {
     const builtin = BUILTIN_OPTIONAL_PROVIDERS.find((provider) => provider.id === mapping.providerId);
     const apiKey = firstEnv(...mapping.apiKeyNames);
-    if (!builtin || !apiKey) return [];
-    const baseUrl = firstEnv(...mapping.baseUrlNames) || builtin.baseUrl;
+    if (!builtin || !apiKey) return null;
+    const baseUrl = (firstEnv(...mapping.baseUrlNames) || builtin.baseUrl).replace(/\/+$/, "");
     const configuredModels = parseModels(firstEnv(...mapping.modelsNames));
-    const models = configuredModels.length ? configuredModels : builtin.models;
-    return [{
+    const discoveredModels = mapping.providerId === "g4f-pollinations" && !configuredModels.length
+      ? await discoverG4fModels(baseUrl, apiKey)
+      : [];
+    const models = configuredModels.length ? configuredModels : discoveredModels.length ? discoveredModels : builtin.models;
+    return {
       ...builtin,
-      baseUrl: baseUrl.replace(/\/+$/, ""),
+      baseUrl,
       apiKey,
       models,
       // Keep the built-in keyless route first; use the environment key as a fallback.
       priority: builtin.priority + 1,
-    }];
-  });
+    } satisfies AiProvider;
+  }));
+  return providers.filter((provider): provider is AiProvider => provider !== null);
 }
 
 function providerFromRecord(record: ProviderConnectionRecord): AiProvider {
@@ -217,7 +242,7 @@ async function listProviders(dependencies: ParadRequestDependencies = {}): Promi
   const records = await listProviderConnections(dependencies);
   const configured = records.map(providerFromRecord).filter((provider) => provider.baseUrl && (provider.apiKey || provider.id === "none"));
   const fallback = envProvider();
-  const envBuiltins = envConfiguredBuiltinProviders();
+  const envBuiltins = await envConfiguredBuiltinProviders();
   const configuredIds = new Set(configured.map((provider) => provider.id));
   const builtins = BUILTIN_OPTIONAL_PROVIDERS.filter((provider) => provider.id === "opencode-zen" || !configuredIds.has(provider.id));
   const all = [...configured, ...(fallback ? [fallback] : []), ...envBuiltins, ...builtins];
@@ -225,7 +250,12 @@ async function listProviders(dependencies: ParadRequestDependencies = {}): Promi
   return deduped.sort((left, right) => (left.priority - right.priority));
 }
 
+function isExcludedModel(providerId: string, model: string): boolean {
+  return providerId === "pollinations" && (model === "openai" || model === "pollinations/openai");
+}
+
 function modelMatches(provider: AiProvider, model: string): boolean {
+  if (isExcludedModel(provider.id, model)) return false;
   if (model.startsWith("auto")) return true;
   if (!provider.models.length) return true;
   return provider.models.includes(model) || provider.models.includes(model.split("/").slice(1).join("/"));
@@ -301,8 +331,10 @@ export async function getAiOnlyModels(request: Request, dependencies: ParadReque
   if (response) return response;
   const providers = await listProviders(dependencies);
   const overrides = await listModelOverrides(dependencies);
-  const data = providers.flatMap((provider) => provider.models.map((id) => ({ id: id.includes("/") ? id : `${provider.id}/${id}`, object: "model", owned_by: provider.id })))
-    .concat(overrides.map((override) => ({ id: `${override.providerId}/${override.modelId}`, object: "model", owned_by: override.providerId, ...(override.displayName ? { name: override.displayName } : {}), ...override.capabilities })))
+  const data = providers.flatMap((provider) => provider.models
+    .filter((id) => !isExcludedModel(provider.id, id))
+    .map((id) => ({ id: id.includes("/") ? id : `${provider.id}/${id}`, object: "model", owned_by: provider.id })))
+    .concat(overrides.filter((override) => !isExcludedModel(override.providerId, override.modelId)).map((override) => ({ id: `${override.providerId}/${override.modelId}`, object: "model", owned_by: override.providerId, ...(override.displayName ? { name: override.displayName } : {}), ...override.capabilities })))
     .filter((item, index, all) => all.findIndex((candidate) => candidate.id === item.id) === index);
   return jsonResponse({ object: "list", data });
 }
