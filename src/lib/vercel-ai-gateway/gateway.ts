@@ -37,8 +37,8 @@ function jsonResponse(body: unknown, status = 200, headers: Record<string, strin
   });
 }
 
-function errorResponse(status: number, message: string, code = "invalid_request_error") {
-  return jsonResponse({ error: { message, type: status >= 500 ? "server_error" : "invalid_request_error", code } }, status);
+function errorResponse(status: number, message: string, code = "invalid_request_error", headers: Record<string, string> = {}) {
+  return jsonResponse({ error: { message, type: status >= 500 ? "server_error" : "invalid_request_error", code } }, status, headers);
 }
 
 function constantTimeEqual(left: string, right: string): boolean {
@@ -267,7 +267,11 @@ function modelMatches(provider: AiProvider, model: string): boolean {
 }
 
 function selectProviders(providers: AiProvider[], model: string): AiProvider[] {
-  const requestedProvider = model.includes("/") ? model.split("/", 1)[0] : null;
+  const requestedProvider = model.startsWith("auto/")
+    ? model.slice("auto/".length)
+    : model.includes("/")
+      ? model.split("/", 1)[0]
+      : null;
   return providers.filter((provider) => (!requestedProvider || provider.id === requestedProvider) && modelMatches(provider, model));
 }
 
@@ -633,19 +637,111 @@ export async function handleAiJobComplete(request: Request, id: string, dependen
   return jsonResponse({ ok: true, id, status: body.status });
 }
 
-const DEFAULT_AUTO_MODELS = [
-  "opencode-zen/laguna-s-2.1-free",
-  "opencode-zen/nemotron-3.5-lightning-free",
-  "opencode-zen/nemotron-3-ultra-free",
-  "opencode-zen/hy3-free",
-  "opencode-zen/mimo-v2.5-free",
-  "opencode-zen/big-pickle",
+const OPEN_CODE_AUTO_FALLBACKS = [
+  "big-pickle",
+  "mimo-v2.5-free",
+  "nemotron-3-ultra-free",
+  "nemotron-3.5-lightning-free",
+  "deepseek-v4-flash-free",
+  "laguna-s-2.1-free",
+  "hy3-free",
 ];
+const MAX_AUTO_G4F_CANDIDATES = 10;
+const MAX_AUTO_SECONDARY_CANDIDATES = 8;
+const ROUTE_COOLDOWN_MS = 30_000;
+const PROVIDER_COOLDOWN_MS = 10_000;
+const routeCooldowns = new Map<string, number>();
 
-function autoModelCandidates(providers: AiProvider[]): string[] {
+function canonicalProviderModel(provider: AiProvider, model: string): string {
+  return model.startsWith(`${provider.id}/`) ? model : `${provider.id}/${model}`;
+}
+
+function providerRouteKey(provider: AiProvider): string {
+  return `${provider.id}|${provider.baseUrl}|${provider.apiKey ? "keyed" : "keyless"}`;
+}
+
+function modelRouteKey(provider: AiProvider, model: string): string {
+  return `${providerRouteKey(provider)}|${model}`;
+}
+
+function isProviderCoolingDown(provider: AiProvider, model: string): boolean {
+  const now = Date.now();
+  const providerUntil = routeCooldowns.get(providerRouteKey(provider)) || 0;
+  const modelUntil = routeCooldowns.get(modelRouteKey(provider, model)) || 0;
+  return providerUntil > now || modelUntil > now;
+}
+
+function noteProviderFailure(provider: AiProvider, model: string, status: number): void {
+  const now = Date.now();
+  if (status === 429) {
+    routeCooldowns.set(modelRouteKey(provider, model), now + ROUTE_COOLDOWN_MS);
+    return;
+  }
+  if (status === 401 || status === 402 || status === 403 || status === 408 || status >= 500) {
+    routeCooldowns.set(providerRouteKey(provider), now + PROVIDER_COOLDOWN_MS);
+  }
+}
+
+function autoModelScore(provider: AiProvider, model: string): number {
+  const metadata = getAiModelMetadata(model, provider.id);
+  if (!["text-chat", "text-chat-vision-candidate"].includes(metadata.modality)) return Number.NEGATIVE_INFINITY;
+  const source = model.slice(`${provider.id}/`.length).toLowerCase();
+  if (source === "auto" || source.includes("auto/free")) return Number.NEGATIVE_INFINITY;
+  let score = provider.id === "g4f-pollinations" ? 10_000 : provider.id === "opencode-zen" ? 6_000 : provider.id === "kilo-gateway" ? 4_000 : 2_000;
+  score += metadata.quality_tier === "strong-candidate" ? 500 : metadata.quality_tier === "curated-free" ? 450 : metadata.quality_tier === "curated-gateway" ? 400 : metadata.quality_tier === "community-experimental" ? 100 : 200;
+  const modelSignals: Array<[RegExp, number]> = [
+    [/claude/, 1_200],
+    [/gpt-5\.6|gpt-5\.5|gpt-5\.4/, 1_150],
+    [/gpt-5\.2|gpt-5\.1/, 1_100],
+    [/kimi[- ]?k3/, 1_050],
+    [/glm[- ]?5\.[234]|z-ai\/glm-5/, 1_025],
+    [/qwen3\.8|max/, 1_000],
+    [/deepseek-v4|deepseek-r1/, 975],
+    [/gemini.*latest|gemini.*2\./, 950],
+    [/grok-4/, 925],
+    [/minimax-m3/, 900],
+    [/nemotron.*(ultra|super)/, 875],
+    [/mimo-v2\.5/, 850],
+  ];
+  for (const [pattern, bonus] of modelSignals) {
+    if (pattern.test(source)) {
+      score += bonus;
+      break;
+    }
+  }
+  if (/uncensor|heretic|unmoderated|abliterated|aggressive/.test(source)) score -= 1_500;
+  if (metadata.confidence === "low") score -= 25;
+  return score;
+}
+
+function rankedProviderModels(provider: AiProvider): string[] {
+  return provider.models
+    .map((model) => canonicalProviderModel(provider, model))
+    .filter((model, index, all) => all.indexOf(model) === index)
+    .filter((model) => autoModelScore(provider, model) !== Number.NEGATIVE_INFINITY)
+    .sort((left, right) => autoModelScore(provider, right) - autoModelScore(provider, left) || left.localeCompare(right));
+}
+
+function autoModelCandidates(providers: AiProvider[], providerScope?: string): string[] {
+  const inScope = (provider: AiProvider) => !providerScope || provider.id === providerScope;
+  const scopedProviders = providers.filter(inScope);
   const configured = parseModels(process.env.OMNIROUTE_AI_AUTO_MODELS || "");
-  const requested = configured.length ? configured : DEFAULT_AUTO_MODELS;
-  return requested.filter((model, index, all) => all.indexOf(model) === index && Boolean(selectProvider(providers, model)));
+  if (configured.length) return configured.filter((model, index, all) => all.indexOf(model) === index && Boolean(selectProvider(scopedProviders, model)));
+  const rankedG4fModels = scopedProviders.filter((provider) => provider.id === "g4f-pollinations").flatMap(rankedProviderModels);
+  const g4fPrimary = rankedG4fModels.slice(0, 1);
+  const g4fFallbacks = rankedG4fModels.slice(1, MAX_AUTO_G4F_CANDIDATES);
+  const opencodeProviders = scopedProviders.filter((provider) => provider.id === "opencode-zen");
+  const opencodePreferred = OPEN_CODE_AUTO_FALLBACKS
+    .map((model) => `opencode-zen/${model}`)
+    .filter((model) => Boolean(selectProvider(opencodeProviders, model)));
+  const opencodeRemaining = opencodeProviders.flatMap(rankedProviderModels).filter((model) => !opencodePreferred.includes(model));
+  const secondary = scopedProviders
+    .filter((provider) => provider.id !== "g4f-pollinations" && provider.id !== "opencode-zen")
+    .flatMap(rankedProviderModels)
+    .slice(0, MAX_AUTO_SECONDARY_CANDIDATES);
+  return [...g4fPrimary, ...opencodePreferred, ...opencodeRemaining, ...g4fFallbacks, ...secondary]
+    .filter((model, index, all) => all.indexOf(model) === index)
+    .filter((model) => Boolean(selectProvider(scopedProviders, model)));
 }
 
 function isRetryableProviderStatus(status: number): boolean {
@@ -670,17 +766,21 @@ export async function handleAiOnlyChatCompletions(request: Request, dependencies
   if (body.model !== undefined && typeof body.model !== "string") return errorResponse(400, "model must be a string");
 
   const requestedModel = body.model?.trim() || "auto";
-  const isAuto = requestedModel === "auto" || requestedModel === "auto/free";
+  const isProviderAuto = requestedModel.startsWith("auto/") && requestedModel !== "auto/free";
+  const isAuto = requestedModel === "auto" || requestedModel === "auto/free" || isProviderAuto;
+  const providerScope = isProviderAuto ? requestedModel.slice("auto/".length) : undefined;
   const policyFailure = policyAllows(policy, "chat.completions", requestedModel);
   if (policyFailure) return policyFailure;
   const providers = await listProviders(dependencies);
-  const models = isAuto ? autoModelCandidates(providers) : [requestedModel];
+  const models = isAuto ? autoModelCandidates(providers, providerScope) : [requestedModel];
   if (!models.length) return errorResponse(503, "No currently available model can serve this request", "provider_unavailable");
 
   let lastResponse: Response | null = null;
+  let lastRetryableStatus: number | null = null;
   for (const model of models) {
     const providerCandidates = selectProviders(providers, model);
     for (const provider of providerCandidates) {
+      if (isProviderCoolingDown(provider, model)) continue;
       const upstreamModel = providerModel(model, provider);
       const endpoint = `${provider.baseUrl}/chat/completions`;
       const controller = new AbortController();
@@ -700,14 +800,21 @@ export async function handleAiOnlyChatCompletions(request: Request, dependencies
         await recordUsage(provider, model, "chat.completions", upstream.ok ? "succeeded" : "failed", responseBody, policy, startedAt, dependencies);
         lastResponse = jsonResponse(responseBody, upstream.status, { "x-omniroute-provider": provider.id, "x-omniroute-model": model });
         if (upstream.ok || !isRetryableProviderStatus(upstream.status)) return lastResponse;
+        lastRetryableStatus = upstream.status;
+        noteProviderFailure(provider, model, upstream.status);
       } catch (error) {
         const message = error instanceof Error && error.name === "AbortError" ? "Provider request timed out" : "Provider request failed";
         await recordUsage(provider, model, "chat.completions", "failed", {}, policy, startedAt, dependencies);
+        lastRetryableStatus = 408;
+        noteProviderFailure(provider, model, 408);
         lastResponse = errorResponse(504, message, "provider_timeout");
       } finally {
         clearTimeout(timeout);
       }
     }
+  }
+  if (lastRetryableStatus !== null) {
+    return errorResponse(503, "All automatic providers are temporarily unavailable; OmniRoute exhausted its fallback routes", "provider_pool_exhausted", { "retry-after": "5" });
   }
   return lastResponse || errorResponse(503, "No currently available model can serve this request", "provider_unavailable");
 }

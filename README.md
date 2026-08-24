@@ -12,7 +12,7 @@ Use one endpoint and let the gateway select an available free model dynamically:
 POST /api/v1/chat/completions
 ```
 
-Set `model` to `auto`, or omit it:
+Set `model` to `auto`, or omit it. Use `auto/<provider-id>` when automatic selection should stay within one configured provider:
 
 ```json
 {
@@ -21,18 +21,18 @@ Set `model` to `auto`, or omit it:
 }
 ```
 
-The current auto-selection candidates are tried in order:
+Global `auto` ranks eligible text-capable models by provider and model signals. When G4F is configured, the strongest cataloged G4F candidates are attempted first. The keyless OpenCode Zen route then provides the curated fallback sequence: `big-pickle`, `mimo-v2.5-free`, Nemotron, DeepSeek, Laguna, and HY3. Kilo, Pollinations, and other configured providers are used afterward when eligible.
+
+The gateway also supports provider-scoped automatic selection:
 
 ```text
-opencode-zen/laguna-s-2.1-free
-opencode-zen/nemotron-3.5-lightning-free
-opencode-zen/nemotron-3-ultra-free
-opencode-zen/hy3-free
-opencode-zen/mimo-v2.5-free
-opencode-zen/big-pickle
+auto/g4f-pollinations
+auto/opencode-zen
+auto/kilo-gateway
+auto/pollinations
 ```
 
-The response includes `x-omniroute-provider` and `x-omniroute-model` headers showing the route selected. Explicit model IDs continue to use only the requested model.
+A retryable provider failure, including HTTP 429, temporarily cools down the affected model or provider and moves the request to the next suitable route. Automatic requests do not return an upstream 429 after fallback exhaustion; they return HTTP 503 with `provider_pool_exhausted` and `Retry-After: 5`. The response includes `x-omniroute-provider` and `x-omniroute-model` headers showing the route selected. Explicit model IDs continue to use only the requested model, while retryable failures are still normalized through the gateway’s provider-failure handling.
 
 ## Client setup
 
