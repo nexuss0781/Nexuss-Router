@@ -1,5 +1,6 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import type { ParadRequestDependencies } from "@/lib/vercel-parad/index.ts";
+import { getAiModelMetadata } from "./modelMetadata";
 import {
   listApiKeyPolicies,
   listProviderConnections,
@@ -333,8 +334,14 @@ export async function getAiOnlyModels(request: Request, dependencies: ParadReque
   const overrides = await listModelOverrides(dependencies);
   const data = providers.flatMap((provider) => provider.models
     .filter((id) => !isExcludedModel(provider.id, id))
-    .map((id) => ({ id: id.includes("/") ? id : `${provider.id}/${id}`, object: "model", owned_by: provider.id })))
-    .concat(overrides.filter((override) => !isExcludedModel(override.providerId, override.modelId)).map((override) => ({ id: `${override.providerId}/${override.modelId}`, object: "model", owned_by: override.providerId, ...(override.displayName ? { name: override.displayName } : {}), ...override.capabilities })))
+    .map((id) => {
+      const modelId = id.includes("/") ? id : `${provider.id}/${id}`;
+      return { id: modelId, object: "model", owned_by: provider.id, ...getAiModelMetadata(modelId, provider.id) };
+    }))
+    .concat(overrides.filter((override) => !isExcludedModel(override.providerId, override.modelId)).map((override) => {
+      const modelId = `${override.providerId}/${override.modelId}`;
+      return { id: modelId, object: "model", owned_by: override.providerId, ...getAiModelMetadata(modelId, override.providerId), ...(override.displayName ? { name: override.displayName } : {}), ...override.capabilities };
+    }))
     .filter((item, index, all) => all.findIndex((candidate) => candidate.id === item.id) === index);
   return jsonResponse({ object: "list", data });
 }
