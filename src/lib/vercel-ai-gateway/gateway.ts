@@ -1,6 +1,6 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import type { ParadRequestDependencies } from "@/lib/vercel-parad/index.ts";
-import { getAiModelMetadata } from "./modelMetadata";
+import { getAiModelMetadata, listAiModelIds } from "./modelMetadata";
 import {
   listApiKeyPolicies,
   listProviderConnections,
@@ -246,7 +246,11 @@ async function listProviders(dependencies: ParadRequestDependencies = {}): Promi
   const envBuiltins = await envConfiguredBuiltinProviders();
   const configuredIds = new Set(configured.map((provider) => provider.id));
   const builtins = BUILTIN_OPTIONAL_PROVIDERS.filter((provider) => provider.id === "opencode-zen" || !configuredIds.has(provider.id));
-  const all = [...configured, ...(fallback ? [fallback] : []), ...envBuiltins, ...builtins];
+  const all = [...configured, ...(fallback ? [fallback] : []), ...envBuiltins, ...builtins].map((provider) => {
+    if (provider.id !== "g4f-pollinations") return provider;
+    const taxonomyModels = listAiModelIds(provider.id).map((id) => id.slice(provider.id.length + 1));
+    return { ...provider, models: Array.from(new Set([...provider.models, ...taxonomyModels])) };
+  });
   const deduped = all.filter((provider, index, values) => values.findIndex((candidate) => candidate.id === provider.id && candidate.baseUrl === provider.baseUrl && Boolean(candidate.apiKey) === Boolean(provider.apiKey)) === index);
   return deduped.sort((left, right) => (left.priority - right.priority));
 }

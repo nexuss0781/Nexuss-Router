@@ -251,6 +251,10 @@ const MODEL_METADATA: Record<string, AiModelMetadata> = {
   "g4f-pollinations/srv_mt1wbaxgf9c946af0c58:Qwen3.6-35B-A3B-Uncensored": { family: "Qwen", modality: "text-chat", task_role: "experimental-general", quality_tier: "community-experimental", priority: "P5-experimental", confidence: "medium", taxonomy_source: "live-omniroute" },
 };
 
+export function listAiModelIds(provider?: string): string[] {
+  return Object.keys(MODEL_METADATA).filter((id) => !provider || id.startsWith(`${provider}/`));
+}
+
 export function getAiModelMetadata(id: string, provider: string): AiModelMetadata {
   return MODEL_METADATA[id] ?? {
     family: "Unknown",
