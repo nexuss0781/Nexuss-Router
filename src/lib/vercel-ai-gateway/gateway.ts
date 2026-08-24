@@ -339,7 +339,7 @@ export async function getAiOnlyModels(request: Request, dependencies: ParadReque
   const data = providers.flatMap((provider) => provider.models
     .filter((id) => !isExcludedModel(provider.id, id))
     .map((id) => {
-      const modelId = id.includes("/") ? id : `${provider.id}/${id}`;
+      const modelId = id.startsWith(`${provider.id}/`) ? id : `${provider.id}/${id}`;
       return { id: modelId, object: "model", owned_by: provider.id, ...getAiModelMetadata(modelId, provider.id) };
     }))
     .concat(overrides.filter((override) => !isExcludedModel(override.providerId, override.modelId)).map((override) => {
