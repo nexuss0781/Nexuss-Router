@@ -813,7 +813,7 @@ export async function handleAiOnlyChatCompletions(request: Request, dependencies
       }
     }
   }
-  if (lastRetryableStatus !== null) {
+  if (isAuto && lastRetryableStatus !== null) {
     return errorResponse(503, "All automatic providers are temporarily unavailable; OmniRoute exhausted its fallback routes", "provider_pool_exhausted", { "retry-after": "5" });
   }
   return lastResponse || errorResponse(503, "No currently available model can serve this request", "provider_unavailable");
