@@ -84,3 +84,5 @@ The workspace includes AI-only handlers for chat completions, completions, respo
 ## Verification
 
 The included test scripts exercise the deployed gateway and model catalog. They expect the gateway key to be supplied through a local secret file or environment, not committed to the repository.
+
+For a complete sequential audit that waits for each model response and checkpoints after every model, see [`docs/long-running-model-audit.md`](docs/long-running-model-audit.md) and run [`scripts/long-running-model-audit.py`](scripts/long-running-model-audit.py).
