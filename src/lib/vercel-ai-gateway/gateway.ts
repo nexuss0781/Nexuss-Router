@@ -132,6 +132,10 @@ const BUILTIN_OPTIONAL_PROVIDERS: AiProvider[] = [
   },
 ];
 
+// G4F can list routes that remain account- or provider-gated at completion time.
+// Retain private configuration for future restoration, but do not discover, expose, or route through it.
+const DISABLED_PROVIDER_IDS = new Set(["g4f-pollinations"]);
+
 function parseModels(value: unknown): string[] {
   if (Array.isArray(value)) return value.filter((item): item is string => typeof item === "string" && Boolean(item.trim())).map((item) => item.trim());
   if (typeof value === "string") {
@@ -201,7 +205,7 @@ async function discoverG4fModels(baseUrl: string, apiKey: string): Promise<strin
 }
 
 async function envConfiguredBuiltinProviders(): Promise<AiProvider[]> {
-  const providers = await Promise.all(BUILTIN_PROVIDER_ENV.map(async (mapping) => {
+  const providers = await Promise.all(BUILTIN_PROVIDER_ENV.filter((mapping) => !DISABLED_PROVIDER_IDS.has(mapping.providerId)).map(async (mapping) => {
     const builtin = BUILTIN_OPTIONAL_PROVIDERS.find((provider) => provider.id === mapping.providerId);
     const apiKey = firstEnv(...mapping.apiKeyNames);
     if (!builtin || !apiKey) return null;
@@ -245,13 +249,15 @@ async function listProviders(dependencies: ParadRequestDependencies = {}): Promi
   const fallback = envProvider();
   const envBuiltins = await envConfiguredBuiltinProviders();
   const configuredIds = new Set(configured.map((provider) => provider.id));
-  const builtins = BUILTIN_OPTIONAL_PROVIDERS.filter((provider) => provider.id === "opencode-zen" || !configuredIds.has(provider.id));
+  const builtins = BUILTIN_OPTIONAL_PROVIDERS.filter((provider) => !DISABLED_PROVIDER_IDS.has(provider.id) && (provider.id === "opencode-zen" || !configuredIds.has(provider.id)));
   const all = [...configured, ...(fallback ? [fallback] : []), ...envBuiltins, ...builtins].map((provider) => {
     if (provider.id !== "g4f-pollinations") return provider;
     const taxonomyModels = listAiModelIds(provider.id).map((id) => id.slice(provider.id.length + 1));
     return { ...provider, models: Array.from(new Set([...provider.models, ...taxonomyModels])) };
   });
-  const deduped = all.filter((provider, index, values) => values.findIndex((candidate) => candidate.id === provider.id && candidate.baseUrl === provider.baseUrl && Boolean(candidate.apiKey) === Boolean(provider.apiKey)) === index);
+  const deduped = all
+    .filter((provider) => !DISABLED_PROVIDER_IDS.has(provider.id))
+    .filter((provider, index, values) => values.findIndex((candidate) => candidate.id === provider.id && candidate.baseUrl === provider.baseUrl && Boolean(candidate.apiKey) === Boolean(provider.apiKey)) === index);
   return deduped.sort((left, right) => (left.priority - right.priority));
 }
 
@@ -646,7 +652,6 @@ const OPEN_CODE_AUTO_FALLBACKS = [
   "laguna-s-2.1-free",
   "hy3-free",
 ];
-const MAX_AUTO_G4F_CANDIDATES = 10;
 const MAX_AUTO_SECONDARY_CANDIDATES = 8;
 const ROUTE_COOLDOWN_MS = 30_000;
 const PROVIDER_COOLDOWN_MS = 10_000;
@@ -687,7 +692,7 @@ function autoModelScore(provider: AiProvider, model: string): number {
   if (!["text-chat", "text-chat-vision-candidate"].includes(metadata.modality)) return Number.NEGATIVE_INFINITY;
   const source = model.slice(`${provider.id}/`.length).toLowerCase();
   if (source === "auto" || source.includes("auto/free")) return Number.NEGATIVE_INFINITY;
-  let score = provider.id === "g4f-pollinations" ? 10_000 : provider.id === "opencode-zen" ? 6_000 : provider.id === "kilo-gateway" ? 4_000 : 2_000;
+  let score = provider.id === "opencode-zen" ? 6_000 : provider.id === "kilo-gateway" ? 4_000 : 2_000;
   score += metadata.quality_tier === "strong-candidate" ? 500 : metadata.quality_tier === "curated-free" ? 450 : metadata.quality_tier === "curated-gateway" ? 400 : metadata.quality_tier === "community-experimental" ? 100 : 200;
   const modelSignals: Array<[RegExp, number]> = [
     [/claude/, 1_200],
@@ -727,19 +732,16 @@ function autoModelCandidates(providers: AiProvider[], providerScope?: string): s
   const scopedProviders = providers.filter(inScope);
   const configured = parseModels(process.env.OMNIROUTE_AI_AUTO_MODELS || "");
   if (configured.length) return configured.filter((model, index, all) => all.indexOf(model) === index && Boolean(selectProvider(scopedProviders, model)));
-  const rankedG4fModels = scopedProviders.filter((provider) => provider.id === "g4f-pollinations").flatMap(rankedProviderModels);
-  const g4fPrimary = rankedG4fModels.slice(0, 1);
-  const g4fFallbacks = rankedG4fModels.slice(1, MAX_AUTO_G4F_CANDIDATES);
   const opencodeProviders = scopedProviders.filter((provider) => provider.id === "opencode-zen");
   const opencodePreferred = OPEN_CODE_AUTO_FALLBACKS
     .map((model) => `opencode-zen/${model}`)
     .filter((model) => Boolean(selectProvider(opencodeProviders, model)));
   const opencodeRemaining = opencodeProviders.flatMap(rankedProviderModels).filter((model) => !opencodePreferred.includes(model));
   const secondary = scopedProviders
-    .filter((provider) => provider.id !== "g4f-pollinations" && provider.id !== "opencode-zen")
+    .filter((provider) => provider.id !== "opencode-zen")
     .flatMap(rankedProviderModels)
     .slice(0, MAX_AUTO_SECONDARY_CANDIDATES);
-  return [...g4fPrimary, ...opencodePreferred, ...opencodeRemaining, ...g4fFallbacks, ...secondary]
+  return [...opencodePreferred, ...opencodeRemaining, ...secondary]
     .filter((model, index, all) => all.indexOf(model) === index)
     .filter((model) => Boolean(selectProvider(scopedProviders, model)));
 }
