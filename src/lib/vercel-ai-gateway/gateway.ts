@@ -657,6 +657,16 @@ const ROUTE_COOLDOWN_MS = 30_000;
 const PROVIDER_COOLDOWN_MS = 10_000;
 const routeCooldowns = new Map<string, number>();
 
+// Verified by a live greeting audit on 2026-08-26. Automatic routing is intentionally
+// restricted to successful inventory entries; explicit requests retain their exact-model behavior.
+const VERIFIED_AUTO_INVENTORY = [
+  "kilo-gateway/nvidia/nemotron-3-super-120b-a12b:free",
+  "opencode-zen/nemotron-3-ultra-free",
+  "kilo-gateway/kilo-auto/free",
+  "opencode-zen/nemotron-3.5-lightning-free",
+  "opencode-zen/laguna-s-2.1-free",
+] as const;
+
 function canonicalProviderModel(provider: AiProvider, model: string): string {
   return model.startsWith(`${provider.id}/`) ? model : `${provider.id}/${model}`;
 }
@@ -730,20 +740,10 @@ function rankedProviderModels(provider: AiProvider): string[] {
 function autoModelCandidates(providers: AiProvider[], providerScope?: string): string[] {
   const inScope = (provider: AiProvider) => !providerScope || provider.id === providerScope;
   const scopedProviders = providers.filter(inScope);
+  const inventory = VERIFIED_AUTO_INVENTORY.filter((model) => Boolean(selectProvider(scopedProviders, model)));
   const configured = parseModels(process.env.OMNIROUTE_AI_AUTO_MODELS || "");
-  if (configured.length) return configured.filter((model, index, all) => all.indexOf(model) === index && Boolean(selectProvider(scopedProviders, model)));
-  const opencodeProviders = scopedProviders.filter((provider) => provider.id === "opencode-zen");
-  const opencodePreferred = OPEN_CODE_AUTO_FALLBACKS
-    .map((model) => `opencode-zen/${model}`)
-    .filter((model) => Boolean(selectProvider(opencodeProviders, model)));
-  const opencodeRemaining = opencodeProviders.flatMap(rankedProviderModels).filter((model) => !opencodePreferred.includes(model));
-  const secondary = scopedProviders
-    .filter((provider) => provider.id !== "opencode-zen")
-    .flatMap(rankedProviderModels)
-    .slice(0, MAX_AUTO_SECONDARY_CANDIDATES);
-  return [...opencodePreferred, ...opencodeRemaining, ...secondary]
-    .filter((model, index, all) => all.indexOf(model) === index)
-    .filter((model) => Boolean(selectProvider(scopedProviders, model)));
+  if (configured.length) return configured.filter((model, index, all) => all.indexOf(model) === index && inventory.includes(model as typeof inventory[number]));
+  return inventory;
 }
 
 function isRetryableProviderStatus(status: number): boolean {
