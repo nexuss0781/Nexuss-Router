@@ -301,6 +301,11 @@ function extractUsage(payload: any): { inputTokens: number | null; outputTokens:
   };
 }
 
+function hasUsableAssistantText(payload: any): boolean {
+  const content = payload?.choices?.[0]?.message?.content;
+  return typeof content === "string" && Boolean(content.trim());
+}
+
 async function authenticateGatewayRequest(
   request: Request,
   dependencies: ParadRequestDependencies,
@@ -801,6 +806,11 @@ export async function handleAiOnlyChatCompletions(request: Request, dependencies
         const responseBody = await upstream.json().catch(() => ({ error: { message: "Provider returned invalid JSON" } }));
         await recordUsage(provider, model, "chat.completions", upstream.ok ? "succeeded" : "failed", responseBody, policy, startedAt, dependencies);
         lastResponse = jsonResponse(responseBody, upstream.status, { "x-omniroute-provider": provider.id, "x-omniroute-model": model });
+        if (isAuto && upstream.ok && !hasUsableAssistantText(responseBody)) {
+          lastRetryableStatus = 502;
+          noteProviderFailure(provider, model, 502);
+          continue;
+        }
         if (upstream.ok || !isRetryableProviderStatus(upstream.status)) return lastResponse;
         lastRetryableStatus = upstream.status;
         noteProviderFailure(provider, model, upstream.status);
