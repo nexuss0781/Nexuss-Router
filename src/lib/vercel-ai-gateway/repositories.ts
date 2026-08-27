@@ -103,6 +103,13 @@ const schemaStatements = [
     created_at TEXT NOT NULL
   )`,
   `CREATE INDEX IF NOT EXISTS idx_ai_usage_events_created_at ON ai_usage_events(created_at)`,
+  `CREATE TABLE IF NOT EXISTS ai_provider_request_limits (
+    provider_id TEXT PRIMARY KEY,
+    last_request_at TEXT,
+    daily_window TEXT NOT NULL,
+    daily_request_count INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL
+  )`,
   `CREATE TABLE IF NOT EXISTS ai_jobs (
     id TEXT PRIMARY KEY,
     api_key_id TEXT,
@@ -460,4 +467,67 @@ export async function recordAiUsageEvent(
     );
     return event.id;
   }, { dependencies });
+}
+
+export type ProviderRequestReservation = {
+  allowed: boolean;
+  reason: "minute" | "daily" | null;
+  retryAfterSeconds: number;
+  dailyRequestCount: number;
+  dailyRequestLimit: number;
+};
+
+export async function reserveProviderRequest(
+  providerId: string,
+  limits: { minimumIntervalMs: number; dailyRequestLimit: number },
+  dependencies: ParadRequestDependencies = {},
+): Promise<ProviderRequestReservation> {
+  return withParadWrite((context) => {
+    ensureAiGatewaySchema(context);
+    const now = new Date();
+    const nowIso = now.toISOString();
+    const utcDay = nowIso.slice(0, 10);
+    const row = context.db.execute(
+      `SELECT last_request_at, daily_window, daily_request_count FROM ai_provider_request_limits WHERE provider_id = ? LIMIT 1`,
+      [providerId],
+    ).rows[0] as { last_request_at?: string | null; daily_window?: string | null; daily_request_count?: number | null } | undefined;
+    const dailyRequestCount = row?.daily_window === utcDay ? Number(row.daily_request_count || 0) : 0;
+    const lastRequestAt = row?.last_request_at ? Date.parse(row.last_request_at) : Number.NaN;
+    const elapsedMs = Number.isFinite(lastRequestAt) ? now.getTime() - lastRequestAt : Number.POSITIVE_INFINITY;
+    if (elapsedMs < limits.minimumIntervalMs) {
+      return {
+        allowed: false,
+        reason: "minute",
+        retryAfterSeconds: Math.max(1, Math.ceil((limits.minimumIntervalMs - elapsedMs) / 1_000)),
+        dailyRequestCount,
+        dailyRequestLimit: limits.dailyRequestLimit,
+      } satisfies ProviderRequestReservation;
+    }
+    if (dailyRequestCount >= limits.dailyRequestLimit) {
+      const nextUtcDay = new Date(`${utcDay}T00:00:00.000Z`);
+      nextUtcDay.setUTCDate(nextUtcDay.getUTCDate() + 1);
+      return {
+        allowed: false,
+        reason: "daily",
+        retryAfterSeconds: Math.max(1, Math.ceil((nextUtcDay.getTime() - now.getTime()) / 1_000)),
+        dailyRequestCount,
+        dailyRequestLimit: limits.dailyRequestLimit,
+      } satisfies ProviderRequestReservation;
+    }
+    const nextCount = dailyRequestCount + 1;
+    context.db.execute(
+      `INSERT INTO ai_provider_request_limits (provider_id, last_request_at, daily_window, daily_request_count, updated_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(provider_id) DO UPDATE SET last_request_at=excluded.last_request_at, daily_window=excluded.daily_window,
+       daily_request_count=excluded.daily_request_count, updated_at=excluded.updated_at`,
+      [providerId, nowIso, utcDay, nextCount, nowIso],
+    );
+    return {
+      allowed: true,
+      reason: null,
+      retryAfterSeconds: 0,
+      dailyRequestCount: nextCount,
+      dailyRequestLimit: limits.dailyRequestLimit,
+    } satisfies ProviderRequestReservation;
+  }, { dependencies, maxRetries: 4 }).then((result) => result.value);
 }

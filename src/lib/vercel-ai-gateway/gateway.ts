@@ -14,12 +14,16 @@ import {
   listAiJobs,
   updateAiJob,
   recordAiUsageEvent,
+  reserveProviderRequest,
+  type ProviderRequestReservation,
   type AiApiKeyPolicy,
   type ProviderConnectionRecord,
 } from "./repositories.ts";
 
 const MAX_CHAT_BODY_BYTES = 4 * 1024 * 1024;
 const MAX_PROVIDER_TIMEOUT_MS = 240_000;
+const AIRFORCE_MINIMUM_REQUEST_INTERVAL_MS = 60_000;
+const AIRFORCE_DAILY_REQUEST_LIMIT = 1_000;
 
 export type AiProvider = {
   id: string;
@@ -131,6 +135,16 @@ const BUILTIN_OPTIONAL_PROVIDERS: AiProvider[] = [
     models: ["openrouter/free"],
   },
   {
+    id: "airforce",
+    baseUrl: "https://api.airforce/v1",
+    apiKey: "",
+    format: "openai",
+    priority: 1030,
+    models: [
+      "codestral-2508", "codestral-latest", "devstral-2512", "devstral-latest", "devstral-medium-latest", "gemma-4-26b-a4b-it", "gemma3-270m:free", "glm-4.7-flash", "gpt-oss-120b", "gpt-oss-20b", "kimi-k2.7-code", "llama-3.3-70b-instruct-fp8-fast", "llama-4-scout-17b-16e-instruct", "magistral-small-latest", "ministral-14b-2512", "ministral-14b-latest", "ministral-3b-2512", "ministral-3b-latest", "ministral-8b-2512", "ministral-8b-latest", "mistral-code-agent-latest", "mistral-code-fim-latest", "mistral-code-latest", "mistral-large-2512", "mistral-large-latest", "mistral-medium", "mistral-medium-2505", "mistral-medium-2508", "mistral-medium-2604", "mistral-medium-3", "mistral-medium-3.5", "mistral-medium-latest", "mistral-small-2506", "mistral-small-2603", "mistral-small-3.1-24b-instruct", "mistral-small-latest", "mistral-tiny-2407", "mistral-tiny-latest", "mistral-vibe-cli-fast", "mistral-vibe-cli-latest", "mistral-vibe-cli-with-tools", "open-mistral-nemo", "open-mistral-nemo-2407", "qwen3-30b-a3b-fp8", "rnj-1", "suno-v4.5", "suno-v5", "unmoderated-gpt", "voxtral-small-2507", "voxtral-small-latest",
+    ],
+  },
+  {
     id: "g4f-pollinations",
     baseUrl: "https://g4f.space/v1",
     apiKey: "",
@@ -209,6 +223,12 @@ const BUILTIN_PROVIDER_ENV: BuiltinProviderEnv[] = [
     apiKeyNames: ["OMNIROUTE_OPENROUTER_API_KEY", "OPENROUTER_API_KEY"],
     baseUrlNames: ["OMNIROUTE_OPENROUTER_BASE_URL", "OPENROUTER_BASE_URL"],
     modelsNames: ["OMNIROUTE_OPENROUTER_MODELS", "OPENROUTER_MODELS"],
+  },
+  {
+    providerId: "airforce",
+    apiKeyNames: ["OMNIROUTE_AIRFORCE_API_KEY", "AIRFORCE_API_KEY"],
+    baseUrlNames: ["OMNIROUTE_AIRFORCE_BASE_URL", "AIRFORCE_BASE_URL"],
+    modelsNames: ["OMNIROUTE_AIRFORCE_MODELS", "AIRFORCE_MODELS"],
   },
   {
     providerId: "g4f-pollinations",
@@ -315,7 +335,7 @@ async function listProviders(dependencies: ParadRequestDependencies = {}): Promi
   const fallback = envProvider();
   const envBuiltins = await envConfiguredBuiltinProviders();
   const configuredIds = new Set(configured.map((provider) => provider.id));
-  const builtins = BUILTIN_OPTIONAL_PROVIDERS.filter((provider) => !DISABLED_PROVIDER_IDS.has(provider.id) && provider.id !== "openrouter" && (provider.id === "opencode-zen" || !configuredIds.has(provider.id)));
+  const builtins = BUILTIN_OPTIONAL_PROVIDERS.filter((provider) => !DISABLED_PROVIDER_IDS.has(provider.id) && provider.id !== "openrouter" && provider.id !== "airforce" && (provider.id === "opencode-zen" || !configuredIds.has(provider.id)));
   const all = [...configured, ...(fallback ? [fallback] : []), ...envBuiltins, ...builtins].map((provider) => {
     if (provider.id !== "g4f-pollinations") return provider;
     const taxonomyModels = listAiModelIds(provider.id).map((id) => id.slice(provider.id.length + 1));
@@ -419,6 +439,28 @@ async function recordUsage(provider: AiProvider, model: string, endpoint: string
   }, dependencies).catch(() => undefined);
 }
 
+function providerRateLimitResponse(reservation: ProviderRequestReservation): Response {
+  const scope = reservation.reason === "daily" ? "daily" : "per-minute";
+  return errorResponse(
+    429,
+    `Airforce ${scope} request limit reached`,
+    "provider_rate_limited",
+    {
+      "retry-after": String(reservation.retryAfterSeconds),
+      "x-ratelimit-limit": String(reservation.dailyRequestLimit),
+      "x-ratelimit-remaining": String(Math.max(0, reservation.dailyRequestLimit - reservation.dailyRequestCount)),
+    },
+  );
+}
+
+async function reserveProviderUpstreamRequest(provider: AiProvider, dependencies: ParadRequestDependencies): Promise<ProviderRequestReservation | null> {
+  if (provider.id !== "airforce") return null;
+  return reserveProviderRequest(provider.id, {
+    minimumIntervalMs: AIRFORCE_MINIMUM_REQUEST_INTERVAL_MS,
+    dailyRequestLimit: AIRFORCE_DAILY_REQUEST_LIMIT,
+  }, dependencies);
+}
+
 export async function getAiOnlyModels(request: Request, dependencies: ParadRequestDependencies = {}) {
   const { response } = await authenticateGatewayRequest(request, dependencies);
   if (response) return response;
@@ -496,6 +538,8 @@ export async function handleAiOnlyJsonEndpoint(
   const providers = await listProviders(dependencies);
   const provider = options.providerId ? providers.find((candidate) => candidate.id === options.providerId) : selectProvider(providers, model);
   if (!provider) return errorResponse(503, options.providerId ? `No configured provider ${options.providerId}` : `No configured provider can serve model ${model}`, "provider_unavailable");
+  const reservation = await reserveProviderUpstreamRequest(provider, dependencies);
+  if (reservation && !reservation.allowed) return providerRateLimitResponse(reservation);
   if (options.providerId && model !== "auto" && model.includes("/")) {
     const prefix = model.split("/", 1)[0];
     if (prefix !== provider.id) return errorResponse(400, `Model "${model}" does not belong to provider "${provider.id}"`, "model_provider_mismatch");
@@ -563,6 +607,8 @@ export async function handleAiOnlyMultipartEndpoint(
   const providers = await listProviders(dependencies);
   const provider = options.providerId ? providers.find((candidate) => candidate.id === options.providerId) : selectProvider(providers, model);
   if (!provider) return errorResponse(503, options.providerId ? `No configured provider ${options.providerId}` : `No configured provider can serve model ${model}`, "provider_unavailable");
+  const reservation = await reserveProviderUpstreamRequest(provider, dependencies);
+  if (reservation && !reservation.allowed) return providerRateLimitResponse(reservation);
   const upstreamPath = (options.upstreamPath || endpoint).replace(/^\/+|\/+$/g, "");
   const upstreamUrl = `${provider.baseUrl}/${upstreamPath}`;
   const controller = new AbortController();
@@ -746,6 +792,10 @@ const VERIFIED_AUTO_INVENTORY = [
   "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
   "openrouter/poolside/laguna-s-2.1:free",
   "openrouter/openrouter/free",
+  "airforce/mistral-code-agent-latest",
+  "airforce/gpt-oss-20b",
+  "airforce/kimi-k2.7-code",
+  "airforce/devstral-2512",
 ] as const;
 
 function canonicalProviderModel(provider: AiProvider, model: string): string {
@@ -864,6 +914,14 @@ export async function handleAiOnlyChatCompletions(request: Request, dependencies
     const providerCandidates = selectProviders(providers, model);
     for (const provider of providerCandidates) {
       if (isProviderCoolingDown(provider, model)) continue;
+      const reservation = await reserveProviderUpstreamRequest(provider, dependencies);
+      if (reservation && !reservation.allowed) {
+        lastResponse = providerRateLimitResponse(reservation);
+        lastRetryableStatus = 429;
+        noteProviderFailure(provider, model, 429);
+        if (isProviderAuto) return lastResponse;
+        continue;
+      }
       const upstreamModel = providerModel(model, provider);
       const endpoint = `${provider.baseUrl}/chat/completions`;
       const controller = new AbortController();
