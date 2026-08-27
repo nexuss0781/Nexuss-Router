@@ -148,6 +148,23 @@ const EXCLUDED_OPENROUTER_MODELS = new Set([
   "nvidia/nemotron-3-ultra-550b-a55b:free",
   "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
 ]);
+const EXCLUDED_ORIGINAL_MODELS = new Set([
+  "kilo-gateway/minimax/minimax-m2.5:free",
+  "kilo-gateway/arcee-ai/trinity-large-preview:free",
+  "pollinations/openai-fast",
+  "pollinations/openai-large",
+  "pollinations/qwen-coder",
+  "pollinations/mistral",
+  "pollinations/deepseek",
+  "pollinations/grok",
+  "pollinations/gemini-flash-lite-3.1",
+  "pollinations/perplexity-fast",
+  "pollinations/perplexity-reasoning",
+  "opencode-zen/big-pickle",
+  "opencode-zen/deepseek-v4-flash-free",
+  "opencode-zen/nemotron-3-ultra-free",
+  "opencode-zen/nemotron-3.5-lightning-free",
+]);
 
 function parseModels(value: unknown): string[] {
   if (Array.isArray(value)) return value.filter((item): item is string => typeof item === "string" && Boolean(item.trim())).map((item) => item.trim());
@@ -311,6 +328,8 @@ async function listProviders(dependencies: ParadRequestDependencies = {}): Promi
 }
 
 function isExcludedModel(providerId: string, model: string): boolean {
+  const providerQualifiedModel = model.startsWith(`${providerId}/`) ? model : `${providerId}/${model}`;
+  if (EXCLUDED_ORIGINAL_MODELS.has(providerQualifiedModel)) return true;
   if (providerId === "pollinations") return model === "openai" || model === "pollinations/openai";
   if (providerId === "openrouter") {
     const unqualifiedModel = model.startsWith("openrouter/") ? model.slice("openrouter/".length) : model;
