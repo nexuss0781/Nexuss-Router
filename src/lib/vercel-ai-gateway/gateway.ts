@@ -143,6 +143,11 @@ const BUILTIN_OPTIONAL_PROVIDERS: AiProvider[] = [
 // G4F can list routes that remain account- or provider-gated at completion time.
 // Retain private configuration for future restoration, but do not discover, expose, or route through it.
 const DISABLED_PROVIDER_IDS = new Set(["g4f-pollinations"]);
+const EXCLUDED_OPENROUTER_MODELS = new Set([
+  "dots-studio/dots-3-note-preview:free",
+  "nvidia/nemotron-3-ultra-550b-a55b:free",
+  "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+]);
 
 function parseModels(value: unknown): string[] {
   if (Array.isArray(value)) return value.filter((item): item is string => typeof item === "string" && Boolean(item.trim())).map((item) => item.trim());
@@ -306,7 +311,12 @@ async function listProviders(dependencies: ParadRequestDependencies = {}): Promi
 }
 
 function isExcludedModel(providerId: string, model: string): boolean {
-  return providerId === "pollinations" && (model === "openai" || model === "pollinations/openai");
+  if (providerId === "pollinations") return model === "openai" || model === "pollinations/openai";
+  if (providerId === "openrouter") {
+    const unqualifiedModel = model.startsWith("openrouter/") ? model.slice("openrouter/".length) : model;
+    return EXCLUDED_OPENROUTER_MODELS.has(unqualifiedModel);
+  }
+  return false;
 }
 
 function modelMatches(provider: AiProvider, model: string): boolean {
