@@ -8,29 +8,28 @@ This snapshot documents every model currently returned by the protected OmniRout
 | --- | ---: | ---: | ---: |
 | kilo-gateway | 2 | 2 | 2 |
 | opencode-zen | 3 | 3 | 3 |
-| openrouter | 17 | 17 | 5 |
+| openrouter | 17 | 17 | 4 |
 | airforce | 50 | 5 | 4 |
-| **Total** | **72** | **50** | **14** |
+| **Total** | **72** | **50** | **13** |
 
 ## Evidence-led quality-first Auto proposal
 
-The proposed order uses only models with a readable HTTP 200 completion in the completed benchmarks. It prioritizes broader-capability model families first, retains independently reachable providers, and keeps Airforce behind the primary paths because its provider-wide rate limit is shared.
+The proposed order uses only models with a readable HTTP 200 completion in the completed benchmarks. Music-generation routes are intentionally excluded from text Auto. It prioritizes broader-capability model families first, retains independently reachable providers, and keeps Airforce behind the primary paths because its provider-wide rate limit is shared.
 
 | Priority | Proposed model | Evidence |
 | ---: | --- | --- |
 | 1 | `airforce/kimi-k2.7-code` | Modern code/general route; benchmarked readable at 4/4. |
 | 2 | `kilo-gateway/nvidia/nemotron-3-super-120b-a12b:free` | Large verified general model; benchmarked readable at 4/4. |
 | 3 | `openrouter/nvidia/nemotron-3-super-120b-a12b:free` | Independent verified Nemotron Super route; benchmarked readable at 4/4. |
-| 4 | `openrouter/minimax/minimax-m3:free` | Verified modern route; benchmarked readable at 4/4. |
+| 4 | `openrouter/google/gemma-4-31b-it:free` | Current rebenchmark returned a readable 4/4 completion. |
 | 5 | `opencode-zen/mimo-v2.5-free` | Verified coding route; benchmarked readable at 4/4. |
 | 6 | `opencode-zen/hy3-free` | Verified coding route; benchmarked readable at 4/4. |
 | 7 | `opencode-zen/laguna-s-2.1-free` | Verified coding route; benchmarked readable at 4/4. |
 | 8 | `airforce/gpt-oss-20b` | Reasoning-capable verified route; benchmarked readable at 4/4. |
 | 9 | `airforce/mistral-code-agent-latest` | Fast verified coding fallback; benchmarked readable at 4/4. |
 | 10 | `airforce/devstral-2512` | Verified coding fallback; benchmarked readable at 4/4. |
-| 11 | `openrouter/cohere/north-mini-code:free` | Verified code-focused fallback; benchmarked readable at 4/4. |
-| 12 | `openrouter/liquid/lfm-2.5-2.6b:free` | Verified compact fallback; benchmarked readable at 4/4. |
-| 13 | `kilo-gateway/kilo-auto/free` | Verified provider-managed fallback; benchmarked readable at 4/4. |
+| 11 | `openrouter/cohere/north-mini-code:free` | Current rebenchmark returned a readable 4/4 code-focused completion. |
+| 12 | `kilo-gateway/kilo-auto/free` | Verified provider-managed fallback; benchmarked readable at 4/4. |
 
 No routing behavior is changed by this document. The proposal is ready to implement once approved.
 
@@ -53,23 +52,23 @@ No routing behavior is changed by this document. The proposal is ready to implem
 
 | Model ID | Capability / role | Catalog tier | Direct evidence | Observed latency |
 | --- | --- | --- | --- | ---: |
-| `openrouter/liquid/lfm-2.5-2.6b:free` | text model | unclassified | HTTP 200; readable; 4/4 format score | 16066 ms |
-| `openrouter/nvidia/nemotron-3.5-lightning:free` | text model | unclassified | Previous check: HTTP — | 120015 ms |
-| `openrouter/thinkingmachines/inkling-small:free` | text model | unclassified | Previous check: HTTP 403 | 9956 ms |
-| `openrouter/poolside/laguna-s-2.1:free` | text model | unclassified | Previous check: HTTP 503 | 4045 ms |
-| `openrouter/thinkingmachines/inkling:free` | text model | unclassified | Previous check: HTTP 503 | 3457 ms |
-| `openrouter/poolside/laguna-xs-2.1:free` | text model | unclassified | Previous check: HTTP 429 | 9114 ms |
-| `openrouter/cohere/north-mini-code:free` | text model | unclassified | HTTP 200; readable; 4/4 format score | 9701 ms |
-| `openrouter/z-ai/glm-5.2:free` | text model | unclassified | Previous check: HTTP 429 | 10297 ms |
-| `openrouter/nvidia/nemotron-3.5-content-safety:free` | text model | unclassified | HTTP 200; readable; 0/4 format score | 10638 ms |
-| `openrouter/minimax/minimax-m3:free` | text model | unclassified | HTTP 200; readable; 4/4 format score | 10040 ms |
-| `openrouter/google/gemma-4-26b-a4b-it:free` | text model | unclassified | Previous check: HTTP 429 | 9311 ms |
-| `openrouter/google/gemma-4-31b-it:free` | text model | unclassified | Previous check: HTTP 429 | 8325 ms |
-| `openrouter/google/lyria-3-pro-preview` | text model | unclassified | Previous check: HTTP 502 | 11268 ms |
-| `openrouter/google/lyria-3-clip-preview` | text model | unclassified | Previous check: HTTP 503 | 3926 ms |
-| `openrouter/minimax/minimax-m2.7:free` | text model | unclassified | Previous check: HTTP 503 | 3857 ms |
-| `openrouter/nvidia/nemotron-3-super-120b-a12b:free` | text model | unclassified | HTTP 200; readable; 4/4 format score | 11639 ms |
-| `openrouter/free` | text model | unclassified | Previous check: HTTP 502 | 9544 ms |
+| `openrouter/liquid/lfm-2.5-2.6b:free` | text model | unclassified | Previous check: HTTP 429 | 9073 ms |
+| `openrouter/nvidia/nemotron-3.5-lightning:free` | text model | unclassified | Previous check: HTTP — | 90021 ms |
+| `openrouter/thinkingmachines/inkling-small:free` | text model | unclassified | Previous check: HTTP 403 | 10356 ms |
+| `openrouter/poolside/laguna-s-2.1:free` | text model | unclassified | Previous check: HTTP 503 | 4231 ms |
+| `openrouter/thinkingmachines/inkling:free` | text model | unclassified | Previous check: HTTP 503 | 3291 ms |
+| `openrouter/poolside/laguna-xs-2.1:free` | text model | unclassified | Previous check: HTTP 429 | 9555 ms |
+| `openrouter/cohere/north-mini-code:free` | text model | unclassified | HTTP 200; readable; 4/4 format score | 12076 ms |
+| `openrouter/z-ai/glm-5.2:free` | text model | unclassified | Previous check: HTTP 429 | 9253 ms |
+| `openrouter/nvidia/nemotron-3.5-content-safety:free` | text model | unclassified | HTTP 200; readable; 0/4 format score | 12273 ms |
+| `openrouter/minimax/minimax-m3:free` | text model | unclassified | Previous check: HTTP 429 | 10234 ms |
+| `openrouter/google/gemma-4-26b-a4b-it:free` | text model | unclassified | Previous check: HTTP 429 | 11592 ms |
+| `openrouter/google/gemma-4-31b-it:free` | text model | unclassified | HTTP 200; readable; 4/4 format score | 10433 ms |
+| `openrouter/google/lyria-3-pro-preview` | music/audio generation | specialized | Audio route; text-chat test not applicable | — |
+| `openrouter/google/lyria-3-clip-preview` | music/audio generation | specialized | Audio route; text-chat test not applicable | — |
+| `openrouter/minimax/minimax-m2.7:free` | text model | unclassified | HTTP 200; no readable text; 0/4 format score | 18159 ms |
+| `openrouter/nvidia/nemotron-3-super-120b-a12b:free` | text model | unclassified | HTTP 200; readable; 4/4 format score | 12785 ms |
+| `openrouter/free` | text model | unclassified | Previous check: HTTP 502 | 10590 ms |
 
 ## airforce (50)
 
@@ -120,8 +119,8 @@ No routing behavior is changed by this document. The proposal is ready to implem
 | `airforce/open-mistral-nemo-2407` | chat | unclassified | Not yet benchmarked; catalog operational | — |
 | `airforce/qwen3-30b-a3b-fp8` | chat, reasoning | unclassified | Not yet benchmarked; catalog operational | — |
 | `airforce/rnj-1` | chat, streaming | unclassified | Not yet benchmarked; catalog operational | — |
-| `airforce/suno-v4.5` | images | unclassified | Not yet benchmarked; catalog operational | — |
-| `airforce/suno-v5` | images | unclassified | Not yet benchmarked; catalog operational | — |
+| `airforce/suno-v4.5` | music/audio generation | specialized | Audio route; text-chat test not applicable; catalog operational | — |
+| `airforce/suno-v5` | music/audio generation | specialized | Audio route; text-chat test not applicable; catalog operational | — |
 | `airforce/unmoderated-gpt` | chat | unclassified | Not yet benchmarked; catalog operational | — |
 | `airforce/voxtral-small-2507` | chat | unclassified | Not yet benchmarked; catalog operational | — |
 | `airforce/voxtral-small-latest` | chat | unclassified | Not yet benchmarked; catalog operational | — |
@@ -130,5 +129,6 @@ No routing behavior is changed by this document. The proposal is ready to implem
 
 - Live OmniRoute catalog captured after the Airforce integration.
 - Original provider benchmark: 20-model sequential direct check.
-- OpenRouter benchmark: 20-model sequential direct check before catalog filtering.
+- OpenRouter benchmark: current 17-route modality-aware review; 15 text routes were rebenchmarked and two Lyria routes were classified as music/audio generation.
 - Airforce benchmark: ten-model rate-limited direct check with at least 65 seconds between starts.
+- OpenRouter Lyria pages confirm that Lyria Pro and Lyria Clip generate 48 kHz stereo music/audio from text prompts or image inputs: https://openrouter.ai/google/lyria-3-pro-preview/api and https://openrouter.ai/google/lyria-3-clip-preview.
