@@ -9,6 +9,10 @@ export type AiModelMetadata = {
 };
 
 const MODEL_METADATA: Record<string, AiModelMetadata> = {
+  "openrouter/google/lyria-3-pro-preview": { family: "Lyria/Google", modality: "audio-generation", task_role: "music-generation", quality_tier: "specialized", priority: "P-specialized", confidence: "high", taxonomy_source: "live-omniroute" },
+  "openrouter/google/lyria-3-clip-preview": { family: "Lyria/Google", modality: "audio-generation", task_role: "music-generation", quality_tier: "specialized", priority: "P-specialized", confidence: "high", taxonomy_source: "live-omniroute" },
+  "airforce/suno-v4.5": { family: "Suno", modality: "audio-generation", task_role: "music-generation", quality_tier: "specialized", priority: "P-specialized", confidence: "high", taxonomy_source: "live-omniroute" },
+  "airforce/suno-v5": { family: "Suno", modality: "audio-generation", task_role: "music-generation", quality_tier: "specialized", priority: "P-specialized", confidence: "high", taxonomy_source: "live-omniroute" },
   "g4f-pollinations/srv_mp5miql908c8738d71be:flux": { family: "Flux/Image", modality: "image-generation", task_role: "image-creation", quality_tier: "specialized", priority: "P-specialized", confidence: "medium", taxonomy_source: "live-omniroute" },
   "g4f-pollinations/srv_mrdypihj16e8b1776409:CloudCompile/agnes-image-2.0-flash": { family: "Flux/Image", modality: "image-generation", task_role: "image-creation", quality_tier: "specialized", priority: "P-specialized", confidence: "medium", taxonomy_source: "live-omniroute" },
   "g4f-pollinations/srv_mrdypihj16e8b1776409:dreamshaper": { family: "Flux/Image", modality: "image-generation", task_role: "image-creation", quality_tier: "specialized", priority: "P-specialized", confidence: "medium", taxonomy_source: "live-omniroute" },
