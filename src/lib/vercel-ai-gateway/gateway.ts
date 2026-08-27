@@ -123,6 +123,14 @@ const BUILTIN_OPTIONAL_PROVIDERS: AiProvider[] = [
     ],
   },
   {
+    id: "openrouter",
+    baseUrl: "https://openrouter.ai/api/v1",
+    apiKey: "",
+    format: "openai",
+    priority: 1020,
+    models: ["openrouter/free"],
+  },
+  {
     id: "g4f-pollinations",
     baseUrl: "https://g4f.space/v1",
     apiKey: "",
@@ -175,6 +183,12 @@ const BUILTIN_PROVIDER_ENV: BuiltinProviderEnv[] = [
     modelsNames: ["OMNIROUTE_KILO_MODELS", "KILO_GATEWAY_MODELS", "KILO_MODELS"],
   },
   {
+    providerId: "openrouter",
+    apiKeyNames: ["OMNIROUTE_OPENROUTER_API_KEY", "OPENROUTER_API_KEY"],
+    baseUrlNames: ["OMNIROUTE_OPENROUTER_BASE_URL", "OPENROUTER_BASE_URL"],
+    modelsNames: ["OMNIROUTE_OPENROUTER_MODELS", "OPENROUTER_MODELS"],
+  },
+  {
     providerId: "g4f-pollinations",
     apiKeyNames: ["OMNIROUTE_G4F_API_KEY", "G4F_POLLINATIONS_API_KEY", "G4F_API_KEY"],
     baseUrlNames: ["OMNIROUTE_G4F_BASE_URL", "G4F_POLLINATIONS_BASE_URL", "G4F_BASE_URL"],
@@ -204,6 +218,34 @@ async function discoverG4fModels(baseUrl: string, apiKey: string): Promise<strin
   }
 }
 
+function isZeroPrice(value: unknown): boolean {
+  return typeof value === "number" ? value === 0 : typeof value === "string" && Number(value) === 0;
+}
+
+async function discoverOpenRouterFreeModels(baseUrl: string, apiKey: string): Promise<string[]> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 12_000);
+  try {
+    const response = await fetch(`${baseUrl}/models`, {
+      headers: { authorization: `Bearer ${apiKey}` },
+      signal: controller.signal,
+    });
+    if (!response.ok) return [];
+    const payload = await response.json().catch(() => null) as { data?: unknown } | null;
+    if (!Array.isArray(payload?.data)) return [];
+    return payload.data
+      .filter((item): item is { id: string; pricing?: { prompt?: unknown; completion?: unknown } } => Boolean(item) && typeof item === "object" && "id" in item && typeof item.id === "string")
+      .filter((item) => isZeroPrice(item.pricing?.prompt) && isZeroPrice(item.pricing?.completion))
+      .map((item) => item.id)
+      .filter(Boolean)
+      .slice(0, 1_000);
+  } catch {
+    return [];
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 async function envConfiguredBuiltinProviders(): Promise<AiProvider[]> {
   const providers = await Promise.all(BUILTIN_PROVIDER_ENV.filter((mapping) => !DISABLED_PROVIDER_IDS.has(mapping.providerId)).map(async (mapping) => {
     const builtin = BUILTIN_OPTIONAL_PROVIDERS.find((provider) => provider.id === mapping.providerId);
@@ -211,9 +253,11 @@ async function envConfiguredBuiltinProviders(): Promise<AiProvider[]> {
     if (!builtin || !apiKey) return null;
     const baseUrl = (firstEnv(...mapping.baseUrlNames) || builtin.baseUrl).replace(/\/+$/, "");
     const configuredModels = parseModels(firstEnv(...mapping.modelsNames));
-    const discoveredModels = mapping.providerId === "g4f-pollinations" && !configuredModels.length
+    const discoveredModels = !configuredModels.length && mapping.providerId === "g4f-pollinations"
       ? await discoverG4fModels(baseUrl, apiKey)
-      : [];
+      : !configuredModels.length && mapping.providerId === "openrouter"
+        ? await discoverOpenRouterFreeModels(baseUrl, apiKey)
+        : [];
     const models = configuredModels.length ? configuredModels : discoveredModels.length ? discoveredModels : builtin.models;
     return {
       ...builtin,
@@ -249,7 +293,7 @@ async function listProviders(dependencies: ParadRequestDependencies = {}): Promi
   const fallback = envProvider();
   const envBuiltins = await envConfiguredBuiltinProviders();
   const configuredIds = new Set(configured.map((provider) => provider.id));
-  const builtins = BUILTIN_OPTIONAL_PROVIDERS.filter((provider) => !DISABLED_PROVIDER_IDS.has(provider.id) && (provider.id === "opencode-zen" || !configuredIds.has(provider.id)));
+  const builtins = BUILTIN_OPTIONAL_PROVIDERS.filter((provider) => !DISABLED_PROVIDER_IDS.has(provider.id) && provider.id !== "openrouter" && (provider.id === "opencode-zen" || !configuredIds.has(provider.id)));
   const all = [...configured, ...(fallback ? [fallback] : []), ...envBuiltins, ...builtins].map((provider) => {
     if (provider.id !== "g4f-pollinations") return provider;
     const taxonomyModels = listAiModelIds(provider.id).map((id) => id.slice(provider.id.length + 1));
@@ -670,6 +714,9 @@ const VERIFIED_AUTO_INVENTORY = [
   "kilo-gateway/kilo-auto/free",
   "opencode-zen/nemotron-3.5-lightning-free",
   "opencode-zen/laguna-s-2.1-free",
+  "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
+  "openrouter/poolside/laguna-s-2.1:free",
+  "openrouter/openrouter/free",
 ] as const;
 
 function canonicalProviderModel(provider: AiProvider, model: string): string {
