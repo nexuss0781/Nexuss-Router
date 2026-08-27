@@ -1,0 +1,40 @@
+name: Airforce Free Model Audit
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: airforce-free-model-audit
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    name: Rate-limited Airforce free text audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Audit Airforce text routes
+        env:
+          OMNIROUTE_GATEWAY_URL: ${{ secrets.OMNIROUTE_GATEWAY_URL }}
+          OMNIROUTE_GATEWAY_KEY: ${{ secrets.OMNIROUTE_GATEWAY_KEY }}
+        run: node scripts/airforce-free-text-audit.mjs
+
+      - name: Upload audit results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: airforce-free-text-audit
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 30
