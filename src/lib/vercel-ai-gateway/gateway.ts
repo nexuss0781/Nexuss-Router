@@ -941,11 +941,15 @@ export async function handleAiOnlyChatCompletions(request: Request, dependencies
   const policyFailure = policyAllows(policy, "chat.completions", requestedModel);
   if (policyFailure) return policyFailure;
   const providers = await listProviders(dependencies);
-  const models = isAuto ? autoModelCandidates(providers, providerScope).slice(0, routingClass === "agent-fast" ? 2 : MAX_AUTO_SECONDARY_CANDIDATES + 1) : [requestedModel];
+  // Automatic routing escalates the deadline instead of returning an early
+  // timeout: fast -> balanced -> quality. Keep enough candidates available for
+  // the later phases to make progress when the first provider is slow.
+  const models = isAuto ? autoModelCandidates(providers, providerScope).slice(0, MAX_AUTO_SECONDARY_CANDIDATES + 1) : [requestedModel];
   if (!models.length) return errorResponse(503, "No currently available model can serve this request", "provider_unavailable");
 
   let lastResponse: Response | null = null;
   let lastRetryableStatus: number | null = null;
+  let attempt = 0;
   for (const model of models) {
     const providerCandidates = selectProviders(providers, model);
     for (const provider of providerCandidates) {
@@ -961,7 +965,13 @@ export async function handleAiOnlyChatCompletions(request: Request, dependencies
       const upstreamModel = providerModel(model, provider);
       const endpoint = `${provider.baseUrl}/chat/completions`;
       const controller = new AbortController();
-      const deadline = routingClass === "agent-fast" ? AGENT_FAST_DEADLINE_MS : routingClass === "agent-balanced" ? AGENT_BALANCED_DEADLINE_MS : MAX_PROVIDER_TIMEOUT_MS;
+      const phase = !isAuto || routingClass === "quality"
+        ? "quality"
+        : routingClass === "agent-balanced"
+          ? (attempt === 0 ? "balanced" : "quality")
+          : (attempt === 0 ? "fast" : attempt === 1 ? "balanced" : "quality");
+      const deadline = phase === "fast" ? AGENT_FAST_DEADLINE_MS : phase === "balanced" ? AGENT_BALANCED_DEADLINE_MS : MAX_PROVIDER_TIMEOUT_MS;
+      attempt += 1;
       const timeout = setTimeout(() => controller.abort(), deadline);
       const startedAt = Date.now();
       try {
@@ -973,11 +983,11 @@ export async function handleAiOnlyChatCompletions(request: Request, dependencies
         });
         if (body.stream === true && upstream.ok) {
           const stream = streamWithUsage(upstream.body, () => void recordUsage(provider, model, "chat.completions", "succeeded", {}, policy, startedAt, dependencies));
-          return new Response(stream, { status: upstream.status, headers: { "content-type": upstream.headers.get("content-type") || "text/event-stream", "cache-control": "no-cache", "x-omniroute-provider": provider.id, "x-omniroute-model": model } });
+          return new Response(stream, { status: upstream.status, headers: { "content-type": upstream.headers.get("content-type") || "text/event-stream", "cache-control": "no-cache", "x-omniroute-provider": provider.id, "x-omniroute-model": model, "x-omniroute-routing-class": phase } });
         }
         const responseBody = await upstream.json().catch(() => ({ error: { message: "Provider returned invalid JSON" } }));
         await recordUsage(provider, model, "chat.completions", upstream.ok ? "succeeded" : "failed", responseBody, policy, startedAt, dependencies);
-        lastResponse = jsonResponse(responseBody, upstream.status, { "x-omniroute-provider": provider.id, "x-omniroute-model": model });
+        lastResponse = jsonResponse(responseBody, upstream.status, { "x-omniroute-provider": provider.id, "x-omniroute-model": model, "x-omniroute-routing-class": phase });
         if (isAuto && upstream.ok && !hasUsableAssistantText(responseBody)) {
           lastRetryableStatus = 502;
           noteProviderFailure(provider, model, 502);
