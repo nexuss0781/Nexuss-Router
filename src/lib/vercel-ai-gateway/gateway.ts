@@ -19,6 +19,15 @@ import {
   type AiApiKeyPolicy,
   type ProviderConnectionRecord,
 } from "./repositories.ts";
+import {
+  findHotPolicy,
+  hasSupabaseGateway,
+  listHotPolicies,
+  listHotModelOverrides,
+  listHotProviders,
+  enqueueUsageEvent,
+  reserveHotProviderRequest,
+} from "@/lib/supabaseGateway";
 
 const MAX_CHAT_BODY_BYTES = 4 * 1024 * 1024;
 const MAX_PROVIDER_TIMEOUT_MS = 240_000;
@@ -295,11 +304,9 @@ async function envConfiguredBuiltinProviders(): Promise<AiProvider[]> {
     if (!builtin || !apiKey) return null;
     const baseUrl = (firstEnv(...mapping.baseUrlNames) || builtin.baseUrl).replace(/\/+$/, "");
     const configuredModels = parseModels(firstEnv(...mapping.modelsNames));
-    const discoveredModels = !configuredModels.length && mapping.providerId === "g4f-pollinations"
-      ? await discoverG4fModels(baseUrl, apiKey)
-      : !configuredModels.length && mapping.providerId === "openrouter"
-        ? await discoverOpenRouterFreeModels(baseUrl, apiKey)
-        : [];
+    // Catalog discovery is deliberately never performed on a request path.
+    // A scheduled catalog refresher may persist models into Supabase later.
+    const discoveredModels: string[] = [];
     const models = configuredModels.length ? configuredModels : discoveredModels.length ? discoveredModels : builtin.models;
     return {
       ...builtin,
@@ -330,7 +337,9 @@ function providerFromRecord(record: ProviderConnectionRecord): AiProvider {
 }
 
 async function listProviders(dependencies: ParadRequestDependencies = {}): Promise<AiProvider[]> {
-  const records = await listProviderConnections(dependencies);
+  const records = hasSupabaseGateway()
+    ? (await listHotProviders()).map((provider) => ({ id: provider.id, providerId: provider.id, baseUrl: provider.baseUrl, format: provider.format, credentials: { apiKey: provider.apiKey }, models: provider.models, priority: provider.priority }))
+    : await listProviderConnections(dependencies);
   const configured = records.map(providerFromRecord).filter((provider) => provider.baseUrl && (provider.apiKey || provider.id === "none"));
   const fallback = envProvider();
   const envBuiltins = await envConfiguredBuiltinProviders();
@@ -399,6 +408,21 @@ function hasUsableAssistantText(payload: any): boolean {
   return typeof content === "string" && Boolean(content.trim());
 }
 
+function streamWithUsage(body: ReadableStream<Uint8Array> | null, onComplete: () => void): ReadableStream<Uint8Array> | null {
+  if (!body) return null;
+  const reader = body.getReader();
+  return new ReadableStream({
+    async pull(controller) {
+      try {
+        const next = await reader.read();
+        if (next.done) { controller.close(); onComplete(); return; }
+        controller.enqueue(next.value);
+      } catch (error) { controller.error(error); onComplete(); }
+    },
+    cancel(reason) { void reader.cancel(reason); onComplete(); },
+  });
+}
+
 async function authenticateGatewayRequest(
   request: Request,
   dependencies: ParadRequestDependencies,
@@ -410,8 +434,10 @@ async function authenticateGatewayRequest(
   if (expected && supplied && constantTimeEqual(supplied, expected)) return { policy: null, response: null };
   if (!supplied) return { policy: null, response: errorResponse(401, "Invalid or missing API key", "invalid_api_key") };
 
-  const policies = await listApiKeyPolicies(dependencies);
-  const policy = policies.find((candidate) => constantTimeEqual(candidate.keyHash, hashApiKey(supplied)));
+  const policies = hasSupabaseGateway() ? await listHotPolicies() : await listApiKeyPolicies(dependencies);
+  const policy = hasSupabaseGateway()
+    ? findHotPolicy(policies, supplied) as AiApiKeyPolicy | null
+    : policies.find((candidate) => constantTimeEqual(candidate.keyHash, hashApiKey(supplied))) || null;
   if (!policy) return { policy: null, response: errorResponse(401, "Invalid or missing API key", "invalid_api_key") };
   if (policy.expiresAt && Date.parse(policy.expiresAt) <= Date.now()) return { policy: null, response: errorResponse(401, "API key has expired", "expired_api_key") };
   return { policy, response: null };
@@ -426,7 +452,7 @@ function policyAllows(policy: AiApiKeyPolicy | null, endpoint: string, model: st
 
 async function recordUsage(provider: AiProvider, model: string, endpoint: string, status: string, payload: any, policy: AiApiKeyPolicy | null, startedAt: number, dependencies: ParadRequestDependencies) {
   const { inputTokens, outputTokens } = extractUsage(payload);
-  await recordAiUsageEvent({
+  const event = {
     id: randomUUID(),
     apiKeyId: policy?.id ?? null,
     providerId: provider.id,
@@ -436,7 +462,11 @@ async function recordUsage(provider: AiProvider, model: string, endpoint: string
     inputTokens,
     outputTokens,
     latencyMs: Date.now() - startedAt,
-  }, dependencies).catch(() => undefined);
+  };
+  // Queue persistence is intentionally post-response work. Parad is not on the
+  // synchronous chat path; the durable queue is the accounting boundary.
+  if (hasSupabaseGateway()) void enqueueUsageEvent(event).catch(() => undefined);
+  else void recordAiUsageEvent(event, dependencies).catch(() => undefined);
 }
 
 function providerRateLimitResponse(reservation: ProviderRequestReservation): Response {
@@ -455,17 +485,19 @@ function providerRateLimitResponse(reservation: ProviderRequestReservation): Res
 
 async function reserveProviderUpstreamRequest(provider: AiProvider, dependencies: ParadRequestDependencies): Promise<ProviderRequestReservation | null> {
   if (provider.id !== "airforce") return null;
-  return reserveProviderRequest(provider.id, {
+  const limits = {
     minimumIntervalMs: AIRFORCE_MINIMUM_REQUEST_INTERVAL_MS,
     dailyRequestLimit: AIRFORCE_DAILY_REQUEST_LIMIT,
-  }, dependencies);
+  };
+  if (hasSupabaseGateway()) return reserveHotProviderRequest(provider.id, limits) as Promise<ProviderRequestReservation>;
+  return reserveProviderRequest(provider.id, limits, dependencies);
 }
 
 export async function getAiOnlyModels(request: Request, dependencies: ParadRequestDependencies = {}) {
   const { response } = await authenticateGatewayRequest(request, dependencies);
   if (response) return response;
   const providers = await listProviders(dependencies);
-  const overrides = await listModelOverrides(dependencies);
+  const overrides = hasSupabaseGateway() ? await listHotModelOverrides() : await listModelOverrides(dependencies);
   const data = providers.flatMap((provider) => provider.models
     .filter((id) => !isExcludedModel(provider.id, id))
     .map((id) => {
@@ -777,6 +809,8 @@ const OPEN_CODE_AUTO_FALLBACKS = [
   "hy3-free",
 ];
 const MAX_AUTO_SECONDARY_CANDIDATES = 8;
+const AGENT_FAST_DEADLINE_MS = 3_000;
+const AGENT_BALANCED_DEADLINE_MS = 8_000;
 const ROUTE_COOLDOWN_MS = 30_000;
 const PROVIDER_COOLDOWN_MS = 10_000;
 const routeCooldowns = new Map<string, number>();
@@ -899,13 +933,15 @@ export async function handleAiOnlyChatCompletions(request: Request, dependencies
   if (body.model !== undefined && typeof body.model !== "string") return errorResponse(400, "model must be a string");
 
   const requestedModel = body.model?.trim() || "auto";
+  const routingClass = body.routing_class === "agent-fast" || body.routing_class === "agent-balanced" || body.routing_class === "quality"
+    ? body.routing_class : "auto";
   const isProviderAuto = requestedModel.startsWith("auto/") && requestedModel !== "auto/free";
   const isAuto = requestedModel === "auto" || requestedModel === "auto/free" || isProviderAuto;
   const providerScope = isProviderAuto ? requestedModel.slice("auto/".length) : undefined;
   const policyFailure = policyAllows(policy, "chat.completions", requestedModel);
   if (policyFailure) return policyFailure;
   const providers = await listProviders(dependencies);
-  const models = isAuto ? autoModelCandidates(providers, providerScope) : [requestedModel];
+  const models = isAuto ? autoModelCandidates(providers, providerScope).slice(0, routingClass === "agent-fast" ? 2 : MAX_AUTO_SECONDARY_CANDIDATES + 1) : [requestedModel];
   if (!models.length) return errorResponse(503, "No currently available model can serve this request", "provider_unavailable");
 
   let lastResponse: Response | null = null;
@@ -925,7 +961,8 @@ export async function handleAiOnlyChatCompletions(request: Request, dependencies
       const upstreamModel = providerModel(model, provider);
       const endpoint = `${provider.baseUrl}/chat/completions`;
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), MAX_PROVIDER_TIMEOUT_MS);
+      const deadline = routingClass === "agent-fast" ? AGENT_FAST_DEADLINE_MS : routingClass === "agent-balanced" ? AGENT_BALANCED_DEADLINE_MS : MAX_PROVIDER_TIMEOUT_MS;
+      const timeout = setTimeout(() => controller.abort(), deadline);
       const startedAt = Date.now();
       try {
         const upstream = await fetch(endpoint, {
@@ -935,7 +972,8 @@ export async function handleAiOnlyChatCompletions(request: Request, dependencies
           signal: controller.signal,
         });
         if (body.stream === true && upstream.ok) {
-          return new Response(upstream.body, { status: upstream.status, headers: { "content-type": upstream.headers.get("content-type") || "text/event-stream", "cache-control": "no-cache", "x-omniroute-provider": provider.id, "x-omniroute-model": model } });
+          const stream = streamWithUsage(upstream.body, () => void recordUsage(provider, model, "chat.completions", "succeeded", {}, policy, startedAt, dependencies));
+          return new Response(stream, { status: upstream.status, headers: { "content-type": upstream.headers.get("content-type") || "text/event-stream", "cache-control": "no-cache", "x-omniroute-provider": provider.id, "x-omniroute-model": model } });
         }
         const responseBody = await upstream.json().catch(() => ({ error: { message: "Provider returned invalid JSON" } }));
         await recordUsage(provider, model, "chat.completions", upstream.ok ? "succeeded" : "failed", responseBody, policy, startedAt, dependencies);
