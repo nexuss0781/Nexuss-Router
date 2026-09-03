@@ -27,6 +27,98 @@ When Supabase is configured, the chat path does not call the Parad snapshot repo
 
 The request body may include a `routing_class` value. If it is omitted, the compatibility value `auto` is used.
 
+# New: routing capabilities and endpoint usage
+
+The low-latency routing capabilities are available through the standard chat endpoint:
+
+```text
+POST https://omniouter-vercel.vercel.app/api/v1/chat/completions
+```
+
+The endpoint accepts the normal OpenAI-compatible chat request fields and adds the optional `routing_class` field. The model can be `auto`, `auto/<provider-id>`, or an exact provider-qualified model ID.
+
+### Fast routing
+
+Use `agent-fast` when the agent needs the earliest possible response and can accept a shorter initial provider deadline. The first candidate receives a three-second deadline. If it times out or fails with a retryable status, the gateway automatically continues with the balanced phase and then the quality phase rather than stopping immediately.
+
+```bash
+curl -N https://omniouter-vercel.vercel.app/api/v1/chat/completions \
+  -H "Authorization: Bearer $OMNIROUTE_AI_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "auto",
+    "routing_class": "agent-fast",
+    "stream": true,
+    "messages": [{"role": "user", "content": "Give me a concise deployment checklist."}]
+  }'
+```
+
+### Balanced routing
+
+Use `agent-balanced` when the request needs more provider startup time while still avoiding the general long timeout. The first candidate receives an eight-second deadline. If it fails, the gateway escalates to quality candidates with the longer deadline.
+
+```json
+{
+  "model": "auto",
+  "routing_class": "agent-balanced",
+  "stream": true,
+  "messages": [
+    {"role": "user", "content": "Compare these two implementation approaches."}
+  ]
+}
+```
+
+### Quality routing
+
+Use `quality` for requests where answer quality and completion reliability are more important than the earliest first token. The gateway permits the general provider deadline and continues through eligible quality candidates when a retryable failure occurs.
+
+```json
+{
+  "model": "auto",
+  "routing_class": "quality",
+  "messages": [
+    {"role": "user", "content": "Produce a detailed architecture review with tradeoffs."}
+  ]
+}
+```
+
+### Provider-scoped usage
+
+Any routing class can be combined with provider-scoped automatic selection. This preserves the routing policy while limiting candidates to one provider family.
+
+```json
+{
+  "model": "auto/kilo-gateway",
+  "routing_class": "agent-fast",
+  "stream": true,
+  "messages": [{"role": "user", "content": "Return a short TypeScript example."}]
+}
+```
+
+### Exact-model usage
+
+An exact model ID bypasses broad automatic model selection. The routing class still controls the provider deadline, but the request is not allowed to switch to an unrelated model.
+
+```json
+{
+  "model": "kilo-gateway/nvidia/nemotron-3-super-120b-a12b:free",
+  "routing_class": "agent-balanced",
+  "messages": [{"role": "user", "content": "Summarize this input in three sentences."}]
+}
+```
+
+### Response diagnostics
+
+Successful responses expose the selected route through these headers:
+
+| Header | Meaning |
+|---|---|
+| `x-omniroute-provider` | Provider that returned the response |
+| `x-omniroute-model` | Provider-qualified model selected for the request |
+| `x-omniroute-routing-class` | Deadline phase that completed the request: `fast`, `balanced`, or `quality` |
+
+Clients should keep `stream: true` when time to first token matters. A routing class reduces gateway waiting and controls fallback deadlines, but it cannot make an upstream model generate its first token faster than the provider itself allows.
+
 | Routing class | Intended use | Initial deadline behavior | Fallback behavior |
 |---|---|---:|---|
 | `agent-fast` | Latency-sensitive agents | First attempt uses a 3-second deadline | Escalates to balanced, then quality candidates |
