@@ -60,6 +60,36 @@ Use provider-focused Auto when the task needs one live provider family:
 }
 ```
 
+### New low-latency routing classes
+
+Use the standard `POST /chat/completions` endpoint with an optional `routing_class` field:
+
+| Class | Use when | Behavior |
+| --- | --- | --- |
+| `agent-fast` | Earliest possible first token matters | Starts with a 3-second provider deadline, then escalates to balanced and quality candidates when a route times out or fails |
+| `agent-balanced` | The agent needs more provider startup time | Starts with an 8-second deadline, then escalates to quality candidates |
+| `quality` | Quality and completion reliability matter more than first-token speed | Uses the general provider deadline and quality-oriented fallback candidates |
+| `auto` | Compatibility behavior is preferred | Automatic requests also progress through fast, balanced, and quality phases |
+
+Example:
+
+```json
+{
+  "model": "auto",
+  "routing_class": "agent-fast",
+  "stream": true,
+  "messages": [{"role": "user", "content": "Give a concise deployment checklist."}]
+}
+```
+
+Use `routing_class: "agent-balanced"` for requests that should tolerate a slower provider startup, and `routing_class: "quality"` for detailed or quality-sensitive requests. A retryable timeout, HTTP 408, HTTP 429, authorization failure, payment failure, or HTTP 5xx causes the gateway to continue to the next phase instead of immediately returning an error. An error is returned only after eligible candidates are exhausted.
+
+Routing classes also work with provider-scoped Auto, for example `model: "auto/kilo-gateway"`. Exact model IDs remain exact and do not switch to unrelated models, although the selected routing class still controls the provider deadline.
+
+Successful responses expose `x-omniroute-provider`, `x-omniroute-model`, and `x-omniroute-routing-class` headers. The last header reports the phase that completed the request: `fast`, `balanced`, or `quality`.
+
+The gateway keeps provider and policy data in a short-lived server-side warm cache. It does not synchronously discover provider `/models` during chat handling. Use `GET /models` to inspect the gateway catalog when selecting a model; the catalog includes family, modality, task role, quality tier, priority, confidence, and capability metadata where available.
+
 ### Exact model selection
 
 Request the live catalog first, then pass one exact `data[].id` value unchanged.
