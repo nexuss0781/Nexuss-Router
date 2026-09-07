@@ -125,10 +125,15 @@ function dbConnectionString(): string {
 export type MigrationResult = { applied: boolean; reason?: string; message?: string };
 
 export async function applySupabaseMigration(): Promise<MigrationResult> {
-  const connectionString = dbConnectionString();
-  if (!connectionString || !/^postgres(ql)?:\/\//.test(connectionString)) {
+  const rawConnectionString = dbConnectionString();
+  if (!rawConnectionString || !/^postgres(ql)?:\/\//.test(rawConnectionString)) {
     return { applied: false, reason: "no_db_connection" };
   }
+  // Strip sslmode from the URL so node-postgres does not downgrade to strict
+  // certificate verification (Supabase uses a self-signed chain and connection
+  // strings frequently ship with sslmode=require/verify-full, which overrides
+  // the ssl option and fails with "self-signed certificate in certificate chain").
+  const connectionString = rawConnectionString.replace(/[?&]sslmode=[^&#]+/g, "");
   const client = new Client({
     connectionString,
     ssl: process.env.SUPABASE_DB_SSL === "false" ? false : { rejectUnauthorized: false },
