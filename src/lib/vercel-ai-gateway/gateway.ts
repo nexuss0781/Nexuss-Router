@@ -54,6 +54,41 @@ function errorResponse(status: number, message: string, code = "invalid_request_
   return jsonResponse({ error: { message, type: status >= 500 ? "server_error" : "invalid_request_error", code } }, status, headers);
 }
 
+type UpstreamFailure = { retryable: boolean; code: string; message: string };
+
+// Classifies an upstream HTTP status. Returns null for a successful (2xx)
+// response. Non-retryable failures are caller-side validation errors that
+// retrying another source will not fix. Everything else is retryable so the
+// gateway can move to a different source instead of surfacing a raw upstream
+// 5xx/502 to the client.
+function classifyUpstreamStatus(status: number): UpstreamFailure | null {
+  if (status >= 200 && status < 300) return null;
+  if (status === 400) return { retryable: false, code: "bad_request", message: "The upstream provider rejected the request payload" };
+  if (status === 404) return { retryable: false, code: "not_found", message: "The upstream provider could not find the requested resource or model" };
+  if (status === 405) return { retryable: false, code: "method_not_allowed", message: "The upstream provider rejected the HTTP method" };
+  if (status === 413) return { retryable: false, code: "payload_too_large", message: "The upstream provider rejected the payload size" };
+  if (status === 415) return { retryable: false, code: "unsupported_media_type", message: "The upstream provider rejected the media type" };
+  if (status === 422) return { retryable: false, code: "unprocessable_entity", message: "The upstream provider rejected the request content" };
+  if (status === 401 || status === 403) return { retryable: true, code: "provider_authentication_failed", message: "The upstream provider rejected the gateway credentials" };
+  if (status === 402) return { retryable: true, code: "provider_quota_exceeded", message: "The upstream provider reported insufficient account credit" };
+  if (status === 408 || status === 504) return { retryable: true, code: "provider_timeout", message: "The upstream provider did not respond in time" };
+  if (status === 429) return { retryable: true, code: "provider_rate_limited", message: "The upstream provider rate-limited the request" };
+  if (status >= 500) return { retryable: true, code: "provider_server_error", message: "The upstream provider returned a server error" };
+  return { retryable: true, code: "provider_unavailable", message: "The upstream provider could not serve the request" };
+}
+
+function providersForModel(providers: AiProvider[], model: string, providerId?: string): AiProvider[] {
+  const list = providerId
+    ? providers.filter((candidate) => candidate.id === providerId)
+    : selectProviders(providers, model);
+  return list;
+}
+
+function retryHeaderNames(failures: UpstreamFailure[]): Record<string, string> {
+  const codes = Array.from(new Set(failures.map((failure) => failure.code)));
+  return { "x-omniroute-failure-codes": codes.join(","), "retry-after": "2" };
+}
+
 function constantTimeEqual(left: string, right: string): boolean {
   const a = Buffer.from(left);
   const b = Buffer.from(right);
@@ -417,9 +452,17 @@ function streamWithUsage(body: ReadableStream<Uint8Array> | null, onComplete: ()
         const next = await reader.read();
         if (next.done) { controller.close(); onComplete(); return; }
         controller.enqueue(next.value);
-      } catch (error) { controller.error(error); onComplete(); }
+      } catch (error) {
+        // A mid-stream upstream failure must not propagate an errored stream to
+        // the client (which Vercel would surface as a platform 502). The 200
+        // status has already been committed, so close gracefully and record the
+        // usage event instead.
+        try { await reader.cancel(); } catch { /* ignore */ }
+        controller.close();
+        onComplete();
+      }
     },
-    cancel(reason) { void reader.cancel(reason); onComplete(); },
+    cancel(reason) { void reader.cancel(reason).catch(() => undefined); onComplete(); },
   });
 }
 
@@ -568,39 +611,70 @@ export async function handleAiOnlyJsonEndpoint(
   const policyFailure = policyAllows(policy, options.endpointName || endpoint, model);
   if (policyFailure) return policyFailure;
   const providers = await listProviders(dependencies);
-  const provider = options.providerId ? providers.find((candidate) => candidate.id === options.providerId) : selectProvider(providers, model);
-  if (!provider) return errorResponse(503, options.providerId ? `No configured provider ${options.providerId}` : `No configured provider can serve model ${model}`, "provider_unavailable");
-  const reservation = await reserveProviderUpstreamRequest(provider, dependencies);
-  if (reservation && !reservation.allowed) return providerRateLimitResponse(reservation);
+  const candidates = providersForModel(providers, model, options.providerId);
+  if (!candidates.length) return errorResponse(503, options.providerId ? `No configured provider ${options.providerId}` : `No configured provider can serve model ${model}`, "provider_unavailable");
   if (options.providerId && model !== "auto" && model.includes("/")) {
     const prefix = model.split("/", 1)[0];
-    if (prefix !== provider.id) return errorResponse(400, `Model "${model}" does not belong to provider "${provider.id}"`, "model_provider_mismatch");
+    if (prefix !== options.providerId) return errorResponse(400, `Model "${model}" does not belong to provider "${options.providerId}"`, "model_provider_mismatch");
   }
-  const upstreamModel = model === "auto" ? model : providerModel(model, provider);
-  const upstreamBody = model === "auto" || typeof body.model !== "string" ? body : { ...body, model: upstreamModel };
   const upstreamPath = (options.upstreamPath || endpoint).replace(/^\/+|\/+$/g, "");
-  const upstreamUrl = `${provider.baseUrl}/${upstreamPath}`;
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), MAX_PROVIDER_TIMEOUT_MS);
-  const startedAt = Date.now();
-  try {
-    const upstream = await fetch(upstreamUrl, { method: "POST", headers: upstreamHeaders(provider), body: JSON.stringify(upstreamBody), signal: controller.signal });
-    if (options.streamResponse || body.stream === true) return new Response(upstream.body, { status: upstream.status, headers: { "content-type": upstream.headers.get("content-type") || "text/event-stream", "cache-control": "no-cache", "x-omniroute-provider": provider.id } });
-    if (options.binaryResponse) {
-      const bytes = await upstream.arrayBuffer();
-      await recordUsage(provider, model, options.endpointName || endpoint, upstream.ok ? "succeeded" : "failed", {}, policy, startedAt, dependencies);
-      return new Response(bytes, { status: upstream.status, headers: { "content-type": upstream.headers.get("content-type") || "application/octet-stream", "x-omniroute-provider": provider.id } });
+  const failures: UpstreamFailure[] = [];
+  for (const provider of candidates) {
+    if (isProviderCoolingDown(provider, model)) continue;
+    const reservation = await reserveProviderUpstreamRequest(provider, dependencies);
+    if (reservation && !reservation.allowed) {
+      failures.push({ retryable: true, code: "provider_rate_limited", message: "The provider request limit was reached" });
+      noteProviderFailure(provider, model, 429);
+      if (candidates.length === 1 || options.providerId) break;
+      continue;
     }
-    const responseBody = await upstream.json().catch(() => ({ error: { message: "Provider returned invalid JSON" } }));
-    await recordUsage(provider, model, options.endpointName || endpoint, upstream.ok ? "succeeded" : "failed", responseBody, policy, startedAt, dependencies);
-    return jsonResponse(responseBody, upstream.status, { "x-omniroute-provider": provider.id });
-  } catch (error) {
-    const message = error instanceof Error && error.name === "AbortError" ? "Provider request timed out" : "Provider request failed";
-    await recordUsage(provider, model, options.endpointName || endpoint, "failed", {}, policy, startedAt, dependencies);
-    return errorResponse(504, message, "provider_timeout");
-  } finally {
-    clearTimeout(timeout);
+    const upstreamModel = model === "auto" ? model : providerModel(model, provider);
+    const upstreamBody = model === "auto" || typeof body.model !== "string" ? body : { ...body, model: upstreamModel };
+    const upstreamUrl = `${provider.baseUrl}/${upstreamPath}`;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), MAX_PROVIDER_TIMEOUT_MS);
+    const startedAt = Date.now();
+    try {
+      const upstream = await fetch(upstreamUrl, { method: "POST", headers: upstreamHeaders(provider), body: JSON.stringify(upstreamBody), signal: controller.signal });
+      if (options.streamResponse || body.stream === true) {
+        if (!upstream.ok) {
+          const failure = classifyUpstreamStatus(upstream.status) || { retryable: true, code: "provider_unavailable", message: "The upstream provider could not serve the request" };
+          failures.push(failure);
+          noteProviderFailure(provider, model, upstream.status);
+          await recordUsage(provider, model, options.endpointName || endpoint, "failed", {}, policy, startedAt, dependencies);
+          if (failure.retryable) continue;
+          return errorResponse(503, failure.message, failure.code, retryHeaderNames(failures));
+        }
+        return new Response(upstream.body, { status: 200, headers: { "content-type": upstream.headers.get("content-type") || "text/event-stream", "cache-control": "no-cache", "x-omniroute-provider": provider.id } });
+      }
+      if (!upstream.ok) {
+        const failure = classifyUpstreamStatus(upstream.status) || { retryable: true, code: "provider_unavailable", message: "The upstream provider could not serve the request" };
+        failures.push(failure);
+        noteProviderFailure(provider, model, upstream.status);
+        await recordUsage(provider, model, options.endpointName || endpoint, "failed", {}, policy, startedAt, dependencies);
+        if (failure.retryable) continue;
+        return errorResponse(503, failure.message, failure.code, retryHeaderNames(failures));
+      }
+      if (options.binaryResponse) {
+        const bytes = await upstream.arrayBuffer();
+        await recordUsage(provider, model, options.endpointName || endpoint, "succeeded", {}, policy, startedAt, dependencies);
+        return new Response(bytes, { status: 200, headers: { "content-type": upstream.headers.get("content-type") || "application/octet-stream", "x-omniroute-provider": provider.id } });
+      }
+      const responseBody = await upstream.json().catch(() => ({ error: { message: "Provider returned invalid JSON" } }));
+      await recordUsage(provider, model, options.endpointName || endpoint, "succeeded", responseBody, policy, startedAt, dependencies);
+      return jsonResponse(responseBody, 200, { "x-omniroute-provider": provider.id });
+    } catch (error) {
+      const timedOut = error instanceof Error && error.name === "AbortError";
+      failures.push({ retryable: true, code: "provider_timeout", message: timedOut ? "The provider request timed out" : "The provider request failed" });
+      noteProviderFailure(provider, model, timedOut ? 408 : 500);
+      await recordUsage(provider, model, options.endpointName || endpoint, "failed", {}, policy, startedAt, dependencies);
+      continue;
+    } finally {
+      clearTimeout(timeout);
+    }
   }
+  const primaryMessage = failures.length ? failures[failures.length - 1].message : "No currently available provider could serve this request";
+  return errorResponse(503, primaryMessage, "provider_pool_exhausted", retryHeaderNames(failures));
 }
 
 export type AiMultipartEndpointOptions = {
@@ -637,27 +711,54 @@ export async function handleAiOnlyMultipartEndpoint(
   const policyFailure = policyAllows(policy, options.endpointName || endpoint, model);
   if (policyFailure) return policyFailure;
   const providers = await listProviders(dependencies);
-  const provider = options.providerId ? providers.find((candidate) => candidate.id === options.providerId) : selectProvider(providers, model);
-  if (!provider) return errorResponse(503, options.providerId ? `No configured provider ${options.providerId}` : `No configured provider can serve model ${model}`, "provider_unavailable");
-  const reservation = await reserveProviderUpstreamRequest(provider, dependencies);
-  if (reservation && !reservation.allowed) return providerRateLimitResponse(reservation);
+  const candidates = providersForModel(providers, model, options.providerId);
+  if (!candidates.length) return errorResponse(503, options.providerId ? `No configured provider ${options.providerId}` : `No configured provider can serve model ${model}`, "provider_unavailable");
   const upstreamPath = (options.upstreamPath || endpoint).replace(/^\/+|\/+$/g, "");
-  const upstreamUrl = `${provider.baseUrl}/${upstreamPath}`;
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), MAX_PROVIDER_TIMEOUT_MS);
-  const startedAt = Date.now();
-  try {
-    const upstream = await fetch(upstreamUrl, { method: "POST", headers: provider.apiKey ? { authorization: `Bearer ${provider.apiKey}` } : {}, body: form, signal: controller.signal });
-    const responseBody = await upstream.json().catch(() => ({ error: { message: "Provider returned invalid JSON" } }));
-    await recordUsage(provider, model, options.endpointName || endpoint, upstream.ok ? "succeeded" : "failed", responseBody, policy, startedAt, dependencies);
-    return jsonResponse(responseBody, upstream.status, { "x-omniroute-provider": provider.id });
-  } catch (error) {
-    const message = error instanceof Error && error.name === "AbortError" ? "Provider request timed out" : "Provider request failed";
-    await recordUsage(provider, model, options.endpointName || endpoint, "failed", {}, policy, startedAt, dependencies);
-    return errorResponse(504, message, "provider_timeout");
-  } finally {
-    clearTimeout(timeout);
+  const failures: UpstreamFailure[] = [];
+  for (const provider of candidates) {
+    if (isProviderCoolingDown(provider, model)) continue;
+    const reservation = await reserveProviderUpstreamRequest(provider, dependencies);
+    if (reservation && !reservation.allowed) {
+      failures.push({ retryable: true, code: "provider_rate_limited", message: "The provider request limit was reached" });
+      noteProviderFailure(provider, model, 429);
+      if (candidates.length === 1 || options.providerId) break;
+      continue;
+    }
+    const upstreamModel = model === "auto" ? model : providerModel(model, provider);
+    const upstreamBody = new FormData();
+    for (const [key, value] of form.entries()) {
+      if (key === "model") upstreamBody.append(key, upstreamModel);
+      else upstreamBody.append(key, value);
+    }
+    const upstreamUrl = `${provider.baseUrl}/${upstreamPath}`;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), MAX_PROVIDER_TIMEOUT_MS);
+    const startedAt = Date.now();
+    try {
+      const upstream = await fetch(upstreamUrl, { method: "POST", headers: provider.apiKey ? { authorization: `Bearer ${provider.apiKey}` } : {}, body: upstreamBody, signal: controller.signal });
+      if (!upstream.ok) {
+        const failure = classifyUpstreamStatus(upstream.status) || { retryable: true, code: "provider_unavailable", message: "The upstream provider could not serve the request" };
+        failures.push(failure);
+        noteProviderFailure(provider, model, upstream.status);
+        await recordUsage(provider, model, options.endpointName || endpoint, "failed", {}, policy, startedAt, dependencies);
+        if (failure.retryable) continue;
+        return errorResponse(503, failure.message, failure.code, retryHeaderNames(failures));
+      }
+      const responseBody = await upstream.json().catch(() => ({ error: { message: "Provider returned invalid JSON" } }));
+      await recordUsage(provider, model, options.endpointName || endpoint, "succeeded", responseBody, policy, startedAt, dependencies);
+      return jsonResponse(responseBody, 200, { "x-omniroute-provider": provider.id });
+    } catch (error) {
+      const timedOut = error instanceof Error && error.name === "AbortError";
+      failures.push({ retryable: true, code: "provider_timeout", message: timedOut ? "The provider request timed out" : "The provider request failed" });
+      noteProviderFailure(provider, model, timedOut ? 408 : 500);
+      await recordUsage(provider, model, options.endpointName || endpoint, "failed", {}, policy, startedAt, dependencies);
+      continue;
+    } finally {
+      clearTimeout(timeout);
+    }
   }
+  const primaryMessage = failures.length ? failures[failures.length - 1].message : "No currently available provider could serve this request";
+  return errorResponse(503, primaryMessage, "provider_pool_exhausted", retryHeaderNames(failures));
 }
 
 function fileMetadata(file: { id: string; bytes: number; filename: string; purpose: string; mimeType?: string | null; expiresAt?: string | null; createdAt: string }) {
@@ -911,10 +1012,6 @@ function autoModelCandidates(providers: AiProvider[], providerScope?: string): s
   return inventory;
 }
 
-function isRetryableProviderStatus(status: number): boolean {
-  return status === 401 || status === 402 || status === 403 || status === 408 || status === 429 || status >= 500;
-}
-
 export async function handleAiOnlyChatCompletions(request: Request, dependencies: ParadRequestDependencies = {}) {
   const { policy, response: authFailure } = await authenticateGatewayRequest(request, dependencies);
   if (authFailure) return authFailure;
@@ -949,6 +1046,8 @@ export async function handleAiOnlyChatCompletions(request: Request, dependencies
 
   let lastResponse: Response | null = null;
   let lastRetryableStatus: number | null = null;
+  let lastFailureMessage = "No currently available provider could serve this request";
+  let lastFailureCode = "provider_unavailable";
   let attempt = 0;
   for (const model of models) {
     const providerCandidates = selectProviders(providers, model);
@@ -981,34 +1080,50 @@ export async function handleAiOnlyChatCompletions(request: Request, dependencies
           body: JSON.stringify({ ...body, model: upstreamModel }),
           signal: controller.signal,
         });
-        if (body.stream === true && upstream.ok) {
+        if (body.stream === true) {
+          if (!upstream.ok) {
+            const failure = classifyUpstreamStatus(upstream.status) || { retryable: true, code: "provider_unavailable", message: "The upstream provider could not serve the request" };
+            await recordUsage(provider, model, "chat.completions", "failed", {}, policy, startedAt, dependencies);
+            lastRetryableStatus = upstream.status;
+            noteProviderFailure(provider, model, upstream.status);
+            if (failure.retryable) continue;
+            return errorResponse(503, failure.message, failure.code, { "x-omniroute-provider": provider.id, "x-omniroute-model": model });
+          }
           const stream = streamWithUsage(upstream.body, () => void recordUsage(provider, model, "chat.completions", "succeeded", {}, policy, startedAt, dependencies));
           return new Response(stream, { status: upstream.status, headers: { "content-type": upstream.headers.get("content-type") || "text/event-stream", "cache-control": "no-cache", "x-omniroute-provider": provider.id, "x-omniroute-model": model, "x-omniroute-routing-class": phase } });
         }
+        if (!upstream.ok) {
+          const failure = classifyUpstreamStatus(upstream.status) || { retryable: true, code: "provider_unavailable", message: "The upstream provider could not serve the request" };
+          await recordUsage(provider, model, "chat.completions", "failed", {}, policy, startedAt, dependencies);
+          lastRetryableStatus = upstream.status;
+          noteProviderFailure(provider, model, upstream.status);
+          lastFailureMessage = failure.message;
+          lastFailureCode = failure.code;
+          if (failure.retryable) continue;
+          return errorResponse(503, failure.message, failure.code, { "x-omniroute-provider": provider.id, "x-omniroute-model": model });
+        }
         const responseBody = await upstream.json().catch(() => ({ error: { message: "Provider returned invalid JSON" } }));
-        await recordUsage(provider, model, "chat.completions", upstream.ok ? "succeeded" : "failed", responseBody, policy, startedAt, dependencies);
-        lastResponse = jsonResponse(responseBody, upstream.status, { "x-omniroute-provider": provider.id, "x-omniroute-model": model, "x-omniroute-routing-class": phase });
-        if (isAuto && upstream.ok && !hasUsableAssistantText(responseBody)) {
+        await recordUsage(provider, model, "chat.completions", "succeeded", responseBody, policy, startedAt, dependencies);
+        const response = jsonResponse(responseBody, upstream.status, { "x-omniroute-provider": provider.id, "x-omniroute-model": model, "x-omniroute-routing-class": phase });
+        if (isAuto && !hasUsableAssistantText(responseBody)) {
           lastRetryableStatus = 502;
+          lastFailureMessage = "The upstream provider returned a completion with no readable text";
+          lastFailureCode = "provider_empty_completion";
           noteProviderFailure(provider, model, 502);
           continue;
         }
-        if (upstream.ok || !isRetryableProviderStatus(upstream.status)) return lastResponse;
-        lastRetryableStatus = upstream.status;
-        noteProviderFailure(provider, model, upstream.status);
+        return response;
       } catch (error) {
         const message = error instanceof Error && error.name === "AbortError" ? "Provider request timed out" : "Provider request failed";
         await recordUsage(provider, model, "chat.completions", "failed", {}, policy, startedAt, dependencies);
         lastRetryableStatus = 408;
+        lastFailureMessage = message;
+        lastFailureCode = "provider_timeout";
         noteProviderFailure(provider, model, 408);
-        lastResponse = errorResponse(504, message, "provider_timeout");
       } finally {
         clearTimeout(timeout);
       }
     }
   }
-  if (isAuto && lastRetryableStatus !== null) {
-    return errorResponse(503, "All automatic providers are temporarily unavailable; OmniRoute exhausted its fallback routes", "provider_pool_exhausted", { "retry-after": "5" });
-  }
-  return lastResponse || errorResponse(503, "No currently available model can serve this request", "provider_unavailable");
+  return errorResponse(503, lastFailureMessage, lastFailureCode, { "retry-after": "5", "x-omniroute-failure-codes": lastRetryableStatus !== null ? String(lastRetryableStatus) : "unavailable" });
 }
