@@ -81,6 +81,40 @@ create table if not exists public.ai_parad_batches (
   error text
 );
 
+create table if not exists public.ai_meta (
+  key text primary key,
+  value text,
+  updated_at timestamptz not null default now()
+);
+
+-- Aggregates per provider+model health from the durable usage queue so the
+-- auto-routing pool can be derived from demonstrated runtime capability.
+create or replace function public.get_usage_health(p_window_minutes integer default 360)
+returns table (
+  provider_id text,
+  model text,
+  attempts bigint,
+  failures bigint,
+  avg_latency_ms numeric,
+  last_success_at timestamptz,
+  last_failure_at timestamptz,
+  recent_statuses text[]
+)
+language sql security definer set search_path = public as $fn$
+select
+  q.provider_id,
+  q.model,
+  count(*)::bigint,
+  count(*) filter (where q.status <> 'succeeded')::bigint,
+  round(avg(q.latency_ms) filter (where q.status = 'succeeded')::numeric, 1),
+  max(q.created_at) filter (where q.status = 'succeeded'),
+  max(q.created_at) filter (where q.status <> 'succeeded'),
+  (array_agg(q.status order by q.created_at desc))[1:5]
+from public.ai_usage_queue q
+where q.created_at > now() - make_interval(mins => p_window_minutes)
+group by q.provider_id, q.model;
+$fn$;
+
 create or replace function public.reserve_provider_request(p_provider_id text, p_minimum_interval_ms integer, p_daily_request_limit integer)
 returns jsonb language plpgsql security definer set search_path = public as $fn$
 declare r public.ai_provider_request_limits; now_ts timestamptz := clock_timestamp(); day date := (now_ts at time zone 'utc')::date; elapsed numeric; count_now integer;
@@ -112,6 +146,8 @@ update public.ai_usage_queue set state=case when p_error is null then 'synced' e
 $fn$;
 `;
 
+export const SCHEMA_VERSION = 2;
+
 function dbConnectionString(): string {
   return (
     process.env.SUPABASE_DB_URL ||
@@ -123,6 +159,16 @@ function dbConnectionString(): string {
 }
 
 export type MigrationResult = { applied: boolean; reason?: string; message?: string };
+
+async function currentSchemaVersion(client: Client): Promise<number | null> {
+  try {
+    const result = await client.query<{ value: string }>("select value from public.ai_meta where key = 'schema_version'");
+    const value = Number(result.rows[0]?.value);
+    return Number.isFinite(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
 
 export async function applySupabaseMigration(): Promise<MigrationResult> {
   const rawConnectionString = dbConnectionString();
@@ -143,8 +189,16 @@ export async function applySupabaseMigration(): Promise<MigrationResult> {
   });
   try {
     await client.connect();
+    const current = await currentSchemaVersion(client);
+    if (current !== null && current >= SCHEMA_VERSION) {
+      return { applied: false, message: "not_needed" };
+    }
     await client.query("BEGIN");
     await client.query(LOW_LATENCY_MIGRATION_SQL);
+    await client.query(
+      `insert into public.ai_meta(key,value,updated_at) values ('schema_version', $1, now()) on conflict (key) do update set value = excluded.value, updated_at = now()`,
+      [String(SCHEMA_VERSION)],
+    );
     await client.query("COMMIT");
     return { applied: true, message: "schema migrated" };
   } catch (error) {

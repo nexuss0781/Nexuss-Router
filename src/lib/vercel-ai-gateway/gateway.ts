@@ -22,14 +22,16 @@ import {
 import {
   checkSupabaseHealth,
   findHotPolicy,
+  getHotUsageHealth,
   hasSupabaseGateway,
   listHotPolicies,
   listHotModelOverrides,
   listHotProviders,
   enqueueUsageEvent,
   reserveHotProviderRequest,
+  type UsageHealthRow,
 } from "@/lib/supabaseGateway";
-import { applySupabaseMigration } from "@/lib/supabaseMigration";
+import { applySupabaseMigration, SCHEMA_VERSION } from "@/lib/supabaseMigration";
 
 const MAX_CHAT_BODY_BYTES = 4 * 1024 * 1024;
 const MAX_PROVIDER_TIMEOUT_MS = 240_000;
@@ -560,7 +562,10 @@ export async function getAiOnlyModels(request: Request, dependencies: ParadReque
 export async function getAiGatewayHealth(dependencies: ParadRequestDependencies = {}) {
   let supabase = await checkSupabaseHealth();
   let migration = { attempted: false, applied: false, detail: "not_needed" };
-  if (supabase.configured && supabase.tablesMissing) {
+  // Re-run the (idempotent) migration whenever the schema is missing or behind
+  // the latest version so new tables/RPCs self-deploy without manual SQL.
+  const needsMigration = Boolean(supabase.configured) && (supabase.tablesMissing || supabase.schemaVersion === null || supabase.schemaVersion < SCHEMA_VERSION);
+  if (needsMigration) {
     migration = { attempted: true, applied: false, detail: "attempting" };
     const result = await applySupabaseMigration();
     migration = { attempted: true, applied: result.applied, detail: result.message || result.reason || (result.applied ? "applied" : "not_applied") };
@@ -929,38 +934,13 @@ export async function handleAiJobComplete(request: Request, id: string, dependen
   return jsonResponse({ ok: true, id, status: body.status });
 }
 
-const OPEN_CODE_AUTO_FALLBACKS = [
-  "big-pickle",
-  "mimo-v2.5-free",
-  "nemotron-3-ultra-free",
-  "nemotron-3.5-lightning-free",
-  "deepseek-v4-flash-free",
-  "laguna-s-2.1-free",
-  "hy3-free",
-];
 const MAX_AUTO_SECONDARY_CANDIDATES = 8;
 const AGENT_FAST_DEADLINE_MS = 3_000;
 const AGENT_BALANCED_DEADLINE_MS = 8_000;
+const MAX_COOLDOWN_MS = 5 * 60_000;
 const ROUTE_COOLDOWN_MS = 30_000;
 const PROVIDER_COOLDOWN_MS = 10_000;
 const routeCooldowns = new Map<string, number>();
-
-// Verified by a live greeting audit on 2026-08-26. Automatic routing is intentionally
-// restricted to successful inventory entries; explicit requests retain their exact-model behavior.
-const VERIFIED_AUTO_INVENTORY = [
-  "kilo-gateway/nvidia/nemotron-3-super-120b-a12b:free",
-  "opencode-zen/nemotron-3-ultra-free",
-  "kilo-gateway/kilo-auto/free",
-  "opencode-zen/nemotron-3.5-lightning-free",
-  "opencode-zen/laguna-s-2.1-free",
-  "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
-  "openrouter/poolside/laguna-s-2.1:free",
-  "openrouter/openrouter/free",
-  "airforce/mistral-code-agent-latest",
-  "airforce/gpt-oss-20b",
-  "airforce/kimi-k2.7-code",
-  "airforce/devstral-2512",
-] as const;
 
 function canonicalProviderModel(provider: AiProvider, model: string): string {
   return model.startsWith(`${provider.id}/`) ? model : `${provider.id}/${model}`;
@@ -974,6 +954,44 @@ function modelRouteKey(provider: AiProvider, model: string): string {
   return `${providerRouteKey(provider)}|${model}`;
 }
 
+// Consecutive-failure streak per route drives an exponential circuit breaker:
+// every repeated failure doubles the cooldown (bounded), so saturated endpoints
+// drop out of the rotation faster within a warm instance. A success resets it.
+const failureStreaks = new Map<string, number>();
+
+// Session-scoped tool aptitude. Agents send tool schemas that many free models
+// reject; the pool learns which routes actually accept tools and prefers them.
+const sessionToolFailures = new Map<string, number>();
+const sessionToolSuccesses = new Map<string, number>();
+
+const POOL_HEALTH_TTL_MS = 30_000;
+let poolHealthCache: Map<string, UsageHealthRow> | null = null;
+let poolHealthCacheAt = 0;
+
+async function getPoolHealth(): Promise<Map<string, UsageHealthRow>> {
+  const now = Date.now();
+  if (poolHealthCache && now - poolHealthCacheAt < POOL_HEALTH_TTL_MS) return poolHealthCache;
+  // Supabase is the telemetry store; Parad-only deployments just skip health
+  // ranking and still get the full quality-ranked pool (best effort).
+  const rows = hasSupabaseGateway() ? await getHotUsageHealth() : [];
+  const map = new Map<string, UsageHealthRow>();
+  // q.model already carries the provider-qualified id (e.g.
+  // "kilo-gateway/nvidia/..."), which matches how the candidate pool identifies
+  // models, so store the row under that exact key.
+  for (const row of rows) map.set(row.model, row);
+  poolHealthCache = map;
+  poolHealthCacheAt = now;
+  return map;
+}
+
+function isQuarantinedHealth(row: UsageHealthRow): boolean {
+  if (row.attempts < 3) return false;
+  const streak = (row.recent_statuses || []).slice(0, 3);
+  if (streak.length >= 3 && streak.every((status) => status !== "succeeded")) return true;
+  if (row.attempts >= 5 && row.failures / row.attempts >= 0.5) return true;
+  return false;
+}
+
 function isProviderCoolingDown(provider: AiProvider, model: string): boolean {
   const now = Date.now();
   const providerUntil = routeCooldowns.get(providerRouteKey(provider)) || 0;
@@ -981,15 +999,32 @@ function isProviderCoolingDown(provider: AiProvider, model: string): boolean {
   return providerUntil > now || modelUntil > now;
 }
 
+function noteProviderSuccess(provider: AiProvider, model: string): void {
+  failureStreaks.delete(providerRouteKey(provider));
+  failureStreaks.delete(modelRouteKey(provider, model));
+}
+
 function noteProviderFailure(provider: AiProvider, model: string, status: number): void {
   const now = Date.now();
   if (status === 429) {
-    routeCooldowns.set(modelRouteKey(provider, model), now + ROUTE_COOLDOWN_MS);
+    const key = modelRouteKey(provider, model);
+    const streak = (failureStreaks.get(key) || 0) + 1;
+    failureStreaks.set(key, streak);
+    routeCooldowns.set(key, now + Math.min(ROUTE_COOLDOWN_MS * 2 ** (streak - 1), MAX_COOLDOWN_MS));
     return;
   }
   if (status === 401 || status === 402 || status === 403 || status === 408 || status >= 500) {
-    routeCooldowns.set(providerRouteKey(provider), now + PROVIDER_COOLDOWN_MS);
+    const key = providerRouteKey(provider);
+    const streak = (failureStreaks.get(key) || 0) + 1;
+    failureStreaks.set(key, streak);
+    routeCooldowns.set(key, now + Math.min(PROVIDER_COOLDOWN_MS * 2 ** (streak - 1), MAX_COOLDOWN_MS));
   }
+}
+
+function noteToolResult(provider: AiProvider, model: string, succeeded: boolean): void {
+  const key = modelRouteKey(provider, model);
+  if (succeeded) sessionToolSuccesses.set(key, (sessionToolSuccesses.get(key) || 0) + 1);
+  else sessionToolFailures.set(key, (sessionToolFailures.get(key) || 0) + 1);
 }
 
 function autoModelScore(provider: AiProvider, model: string): number {
@@ -1032,13 +1067,39 @@ function rankedProviderModels(provider: AiProvider): string[] {
     .sort((left, right) => autoModelScore(provider, right) - autoModelScore(provider, left) || left.localeCompare(right));
 }
 
-function autoModelCandidates(providers: AiProvider[], providerScope?: string): string[] {
+// Adaptive auto pool: dynamic discovery (whatever each scoped provider can serve
+// today, quality-ranked) + runtime telemetry. Candidates with a demonstrated all-
+// fail streak or low reliability are quarantined to a last-resort tail so the
+// eager phase uses healthy endpoints while the pool still degrades gracefully
+// instead of hard-503'ing when everything is unhealthy.
+async function autoModelCandidates(providers: AiProvider[], providerScope?: string, wantsTools = false): Promise<string[]> {
   const inScope = (provider: AiProvider) => !providerScope || provider.id === providerScope;
   const scopedProviders = providers.filter(inScope);
-  const inventory = VERIFIED_AUTO_INVENTORY.filter((model) => Boolean(selectProvider(scopedProviders, model)));
+  const health = await getPoolHealth().catch(() => new Map<string, UsageHealthRow>());
+  const scored = scopedProviders.flatMap((provider) =>
+    rankedProviderModels(provider).map((model) => {
+      const row = health.get(model);
+      const quarantined = row ? isQuarantinedHealth(row) : false;
+      const key = modelRouteKey(provider, model);
+      const reliability = row && row.attempts > 0 ? (row.attempts - row.failures) / row.attempts : null;
+      const latency = row?.avg_latency_ms ?? null;
+      let rank = autoModelScore(provider, model);
+      if (reliability !== null) rank += (reliability - 0.5) * 600;
+      if (latency !== null && Number.isFinite(latency)) rank -= latency / 40;
+      if (wantsTools) {
+        rank += (sessionToolSuccesses.get(key) || 0) * 60;
+        rank -= (sessionToolFailures.get(key) || 0) * 120;
+      }
+      if (quarantined) rank -= 1_000_000;
+      return { model, rank };
+    }),
+  );
+  const ordered = scored
+    .sort((left, right) => right.rank - left.rank || left.model.localeCompare(right.model))
+    .map((entry) => entry.model);
   const configured = parseModels(process.env.OMNIROUTE_AI_AUTO_MODELS || "");
-  if (configured.length) return configured.filter((model, index, all) => all.indexOf(model) === index && inventory.includes(model as typeof inventory[number]));
-  return inventory;
+  if (configured.length) return configured.filter((model) => ordered.includes(model));
+  return ordered;
 }
 
 export async function handleAiOnlyChatCompletions(request: Request, dependencies: ParadRequestDependencies = {}) {
@@ -1067,10 +1128,11 @@ export async function handleAiOnlyChatCompletions(request: Request, dependencies
   const policyFailure = policyAllows(policy, "chat.completions", requestedModel);
   if (policyFailure) return policyFailure;
   const providers = await listProviders(dependencies);
+  const wantsTools = Boolean(body.tool_choice) || (Array.isArray(body.tools) && body.tools.length > 0);
   // Automatic routing escalates the deadline instead of returning an early
   // timeout: fast -> balanced -> quality. Keep enough candidates available for
   // the later phases to make progress when the first provider is slow.
-  const models = isAuto ? autoModelCandidates(providers, providerScope).slice(0, MAX_AUTO_SECONDARY_CANDIDATES + 1) : [requestedModel];
+  const models = isAuto ? (await autoModelCandidates(providers, providerScope, wantsTools)).slice(0, MAX_AUTO_SECONDARY_CANDIDATES + 1) : [requestedModel];
   if (!models.length) return errorResponse(503, "No currently available model can serve this request", "provider_unavailable");
 
   let lastResponse: Response | null = null;
@@ -1115,9 +1177,12 @@ export async function handleAiOnlyChatCompletions(request: Request, dependencies
             await recordUsage(provider, model, "chat.completions", "failed", {}, policy, startedAt, dependencies);
             lastRetryableStatus = upstream.status;
             noteProviderFailure(provider, model, upstream.status);
+            if (wantsTools) noteToolResult(provider, model, false);
             if (failure.retryable) continue;
             return errorResponse(503, failure.message, failure.code, { "x-omniroute-provider": provider.id, "x-omniroute-model": model });
           }
+          noteProviderSuccess(provider, model);
+          if (wantsTools) noteToolResult(provider, model, true);
           const stream = streamWithUsage(upstream.body, () => void recordUsage(provider, model, "chat.completions", "succeeded", {}, policy, startedAt, dependencies));
           return new Response(stream, { status: upstream.status, headers: { "content-type": upstream.headers.get("content-type") || "text/event-stream", "cache-control": "no-cache", "x-omniroute-provider": provider.id, "x-omniroute-model": model, "x-omniroute-routing-class": phase } });
         }
@@ -1126,6 +1191,7 @@ export async function handleAiOnlyChatCompletions(request: Request, dependencies
           await recordUsage(provider, model, "chat.completions", "failed", {}, policy, startedAt, dependencies);
           lastRetryableStatus = upstream.status;
           noteProviderFailure(provider, model, upstream.status);
+          if (wantsTools) noteToolResult(provider, model, false);
           lastFailureMessage = failure.message;
           lastFailureCode = failure.code;
           if (failure.retryable) continue;
@@ -1139,8 +1205,11 @@ export async function handleAiOnlyChatCompletions(request: Request, dependencies
           lastFailureMessage = "The upstream provider returned a completion with no readable text";
           lastFailureCode = "provider_empty_completion";
           noteProviderFailure(provider, model, 502);
+          if (wantsTools) noteToolResult(provider, model, false);
           continue;
         }
+        noteProviderSuccess(provider, model);
+        if (wantsTools) noteToolResult(provider, model, true);
         return response;
       } catch (error) {
         const message = error instanceof Error && error.name === "AbortError" ? "Provider request timed out" : "Provider request failed";
@@ -1149,6 +1218,7 @@ export async function handleAiOnlyChatCompletions(request: Request, dependencies
         lastFailureMessage = message;
         lastFailureCode = "provider_timeout";
         noteProviderFailure(provider, model, 408);
+        if (wantsTools) noteToolResult(provider, model, false);
       } finally {
         clearTimeout(timeout);
       }

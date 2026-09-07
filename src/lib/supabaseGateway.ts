@@ -73,7 +73,7 @@ async function cached<T>(key: string, loader: () => Promise<T>): Promise<T> {
 export function invalidateGatewayCache() { cache.clear(); }
 export function hasSupabaseGateway() { return Boolean(config()); }
 
-export type SupabaseHealth = { configured: boolean; reachable: boolean; tablesMissing: boolean; error?: string };
+export type SupabaseHealth = { configured: boolean; reachable: boolean; tablesMissing: boolean; error?: string; schemaVersion?: number | null };
 export async function checkSupabaseHealth(): Promise<SupabaseHealth> {
   const c = config();
   if (!c) return { configured: false, reachable: false, tablesMissing: false };
@@ -81,7 +81,22 @@ export async function checkSupabaseHealth(): Promise<SupabaseHealth> {
     const response = await fetch(`${c.url}/rest/v1/ai_provider_connections?select=id&limit=1`, {
       headers: { apikey: c.key, authorization: `Bearer ${c.key}`, "content-type": "application/json" },
     });
-    if (response.ok) return { configured: true, reachable: true, tablesMissing: false };
+    if (response.ok) {
+      let schemaVersion: number | null = null;
+      try {
+        const meta = await fetch(`${c.url}/rest/v1/ai_meta?key=eq.schema_version&select=value&limit=1`, {
+          headers: { apikey: c.key, authorization: `Bearer ${c.key}`, "content-type": "application/json" },
+        });
+        if (meta.ok) {
+          const rows = (await meta.json()) as Array<{ value?: string }>;
+          const parsed = Number(rows[0]?.value);
+          schemaVersion = Number.isFinite(parsed) ? parsed : null;
+        }
+      } catch {
+        schemaVersion = null;
+      }
+      return { configured: true, reachable: true, tablesMissing: false, schemaVersion };
+    }
     const text = await response.text().catch(() => "");
     if (response.status === 404 && text.includes("PGRST205")) return { configured: true, reachable: true, tablesMissing: true, error: text.slice(0, 200) };
     return { configured: true, reachable: false, tablesMissing: false, error: `Supabase ${response.status}: ${text.slice(0, 200)}` };
@@ -127,6 +142,33 @@ export async function enqueueUsageEvent(event: { id: string; apiKeyId?: string |
   } catch {
     return false;
   }
+}
+
+export type UsageHealthRow = {
+  provider_id: string;
+  model: string;
+  attempts: number;
+  failures: number;
+  avg_latency_ms: number | null;
+  last_success_at: string | null;
+  last_failure_at: string | null;
+  recent_statuses: string[];
+};
+
+export async function getHotUsageHealth(windowMinutes = 360): Promise<UsageHealthRow[]> {
+  return hot("usage-health", async () => {
+    const rows = await (await request("rpc/get_usage_health", { method: "POST", body: JSON.stringify({ p_window_minutes: windowMinutes }) })).json() as any[];
+    return rows.map((row) => ({
+      provider_id: String(row.provider_id),
+      model: String(row.model),
+      attempts: Number(row.attempts ?? 0),
+      failures: Number(row.failures ?? 0),
+      avg_latency_ms: row.avg_latency_ms === null || row.avg_latency_ms === undefined ? null : Number(row.avg_latency_ms),
+      last_success_at: row.last_success_at || null,
+      last_failure_at: row.last_failure_at || null,
+      recent_statuses: Array.isArray(row.recent_statuses) ? row.recent_statuses.map(String) : [],
+    }));
+  }, []);
 }
 
 export type Reservation = { allowed: boolean; reason: "minute" | "daily" | null; retryAfterSeconds: number; dailyRequestCount: number; dailyRequestLimit: number };

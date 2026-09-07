@@ -78,6 +78,38 @@ create table if not exists public.ai_parad_batches (
   error text
 );
 
+create table if not exists public.ai_meta (
+  key text primary key,
+  value text,
+  updated_at timestamptz not null default now()
+);
+
+create or replace function public.get_usage_health(p_window_minutes integer default 360)
+returns table (
+  provider_id text,
+  model text,
+  attempts bigint,
+  failures bigint,
+  avg_latency_ms numeric,
+  last_success_at timestamptz,
+  last_failure_at timestamptz,
+  recent_statuses text[]
+)
+language sql security definer set search_path = public as $$
+select
+  q.provider_id,
+  q.model,
+  count(*)::bigint,
+  count(*) filter (where q.status <> 'succeeded')::bigint,
+  round(avg(q.latency_ms) filter (where q.status = 'succeeded')::numeric, 1),
+  max(q.created_at) filter (where q.status = 'succeeded'),
+  max(q.created_at) filter (where q.status <> 'succeeded'),
+  (array_agg(q.status order by q.created_at desc))[1:5]
+from public.ai_usage_queue q
+where q.created_at > now() - make_interval(mins => p_window_minutes)
+group by q.provider_id, q.model;
+$$;
+
 create or replace function public.reserve_provider_request(p_provider_id text, p_minimum_interval_ms integer, p_daily_request_limit integer)
 returns jsonb language plpgsql security definer set search_path = public as $$
 declare r public.ai_provider_request_limits; now_ts timestamptz := clock_timestamp(); day date := (now_ts at time zone 'utc')::date; elapsed numeric; count_now integer;
