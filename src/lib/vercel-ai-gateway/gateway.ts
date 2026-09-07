@@ -942,6 +942,7 @@ export async function handleAiJobComplete(request: Request, id: string, dependen
 const MAX_AUTO_SECONDARY_CANDIDATES = 21;
 const AGENT_FAST_DEADLINE_MS = 3_000;
 const AGENT_BALANCED_DEADLINE_MS = 8_000;
+const QUALITY_DEADLINE_MS = 20_000;
 const MAX_COOLDOWN_MS = 5 * 60_000;
 const ROUTE_COOLDOWN_MS = 30_000;
 const PROVIDER_COOLDOWN_MS = 10_000;
@@ -1155,10 +1156,14 @@ export async function handleAiOnlyChatCompletions(request: Request, dependencies
   if (body.model !== undefined && typeof body.model !== "string") return errorResponse(400, "model must be a string");
 
   const requestedModel = body.model?.trim() || "auto";
-  const routingClass = body.routing_class === "agent-fast" || body.routing_class === "agent-balanced" || body.routing_class === "quality"
-    ? body.routing_class : "auto";
+  const routingClass = (body.routing_class === "agent-fast" || body.routing_class === "agent-balanced" || body.routing_class === "quality"
+    ? body.routing_class
+    : requestedModel === "quality" ? "quality"
+    : requestedModel === "agent-fast" ? "agent-fast"
+    : requestedModel === "agent-balanced" ? "agent-balanced"
+    : "auto");
   const isProviderAuto = requestedModel.startsWith("auto/") && requestedModel !== "auto/free";
-  const isAuto = requestedModel === "auto" || requestedModel === "auto/free" || isProviderAuto;
+  const isAuto = requestedModel === "auto" || requestedModel === "auto/free" || isProviderAuto || routingClass !== "auto";
   const providerScope = isProviderAuto ? requestedModel.slice("auto/".length) : undefined;
   const policyFailure = policyAllows(policy, "chat.completions", requestedModel);
   if (policyFailure) return policyFailure;
@@ -1203,7 +1208,7 @@ export async function handleAiOnlyChatCompletions(request: Request, dependencies
         : routingClass === "agent-balanced"
           ? (attempt === 0 ? "balanced" : "quality")
           : (attempt === 0 ? "fast" : attempt === 1 ? "balanced" : "quality");
-      const deadline = phase === "fast" ? AGENT_FAST_DEADLINE_MS : phase === "balanced" ? AGENT_BALANCED_DEADLINE_MS : MAX_PROVIDER_TIMEOUT_MS;
+      const deadline = phase === "fast" ? AGENT_FAST_DEADLINE_MS : phase === "balanced" ? AGENT_BALANCED_DEADLINE_MS : (isAuto ? QUALITY_DEADLINE_MS : MAX_PROVIDER_TIMEOUT_MS);
       attempt += 1;
       const timeout = setTimeout(() => controller.abort(), deadline);
       const startedAt = Date.now();
