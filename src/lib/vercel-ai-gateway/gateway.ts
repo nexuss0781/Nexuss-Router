@@ -1145,10 +1145,17 @@ export async function handleAiOnlyChatCompletions(request: Request, dependencies
   let lastFailureMessage = "No currently available provider could serve this request";
   let lastFailureCode = "provider_unavailable";
   let attempt = 0;
+  let attemptedAny = false;
+  let cooldownBypassUsed = false;
   for (const model of models) {
     const providerCandidates = selectProviders(providers, model);
     for (const provider of providerCandidates) {
-      if (isProviderCoolingDown(provider, model)) continue;
+      const coolingDown = isProviderCoolingDown(provider, model);
+      // When every candidate is in cooldown, still give the top of the pool one
+      // best-effort attempt so a saturated free pool degrades onto a real probe
+      // instead of failing out with no attempt at all.
+      if (coolingDown && (attemptedAny || cooldownBypassUsed)) continue;
+      if (coolingDown) cooldownBypassUsed = true;
       const reservation = await reserveProviderUpstreamRequest(provider, dependencies);
       if (reservation && !reservation.allowed) {
         lastResponse = providerRateLimitResponse(reservation);
@@ -1157,6 +1164,7 @@ export async function handleAiOnlyChatCompletions(request: Request, dependencies
         if (isProviderAuto) return lastResponse;
         continue;
       }
+      attemptedAny = true;
       const upstreamModel = providerModel(model, provider);
       const endpoint = `${provider.baseUrl}/chat/completions`;
       const controller = new AbortController();
