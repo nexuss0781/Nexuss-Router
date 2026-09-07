@@ -939,7 +939,7 @@ export async function handleAiJobComplete(request: Request, id: string, dependen
   return jsonResponse({ ok: true, id, status: body.status });
 }
 
-const MAX_AUTO_SECONDARY_CANDIDATES = 8;
+const MAX_AUTO_SECONDARY_CANDIDATES = 21;
 const AGENT_FAST_DEADLINE_MS = 3_000;
 const AGENT_BALANCED_DEADLINE_MS = 8_000;
 const MAX_COOLDOWN_MS = 5 * 60_000;
@@ -1073,35 +1073,65 @@ function rankedProviderModels(provider: AiProvider): string[] {
 }
 
 // Adaptive auto pool: dynamic discovery (whatever each scoped provider can serve
-// today, quality-ranked) + runtime telemetry. Candidates with a demonstrated all-
-// fail streak or low reliability are quarantined to a last-resort tail so the
-// eager phase uses healthy endpoints while the pool still degrades gracefully
-// instead of hard-503'ing when everything is unhealthy.
+// today) + runtime telemetry, BUT in a fixed provider priority order. auto always
+// tries airforce first, then opencode-zen, then kilo-gateway, then every other
+// provider — as one batch pass. Telemetry only demotes demonstrably broken routes
+// (quarantine) to the tail; it never reorders which provider leads. When every
+// candidate is unhealthy the pool still degrades gracefully instead of hard-503ing.
+const AUTO_PROVIDER_PRIORITY = ["airforce", "opencode-zen", "kilo-gateway"];
+
+function providerPriorityIndex(provider: AiProvider): number {
+  const index = AUTO_PROVIDER_PRIORITY.indexOf(provider.id);
+  return index === -1 ? AUTO_PROVIDER_PRIORITY.length : index;
+}
+
 async function autoModelCandidates(providers: AiProvider[], providerScope?: string, wantsTools = false): Promise<string[]> {
   const inScope = (provider: AiProvider) => !providerScope || provider.id === providerScope;
-  const scopedProviders = providers.filter(inScope);
+  const scopedProviders = providers.filter(inScope).sort((a, b) => providerPriorityIndex(a) - providerPriorityIndex(b) || a.priority - b.priority);
   const health = await getPoolHealth().catch(() => new Map<string, UsageHealthRow>());
-  const scored = scopedProviders.flatMap((provider) =>
+  const entries = scopedProviders.flatMap((provider) =>
     rankedProviderModels(provider).map((model) => {
       const row = health.get(model);
       const quarantined = row ? isQuarantinedHealth(row) : false;
       const key = modelRouteKey(provider, model);
       const reliability = row && row.attempts > 0 ? (row.attempts - row.failures) / row.attempts : null;
       const latency = row?.avg_latency_ms ?? null;
-      let rank = autoModelScore(provider, model);
-      if (reliability !== null) rank += (reliability - 0.5) * 600;
-      if (latency !== null && Number.isFinite(latency)) rank -= latency / 40;
+      let score = autoModelScore(provider, model);
+      if (reliability !== null) score += (reliability - 0.5) * 600;
+      if (latency !== null && Number.isFinite(latency)) score -= latency / 40;
       if (wantsTools) {
-        rank += (sessionToolSuccesses.get(key) || 0) * 60;
-        rank -= (sessionToolFailures.get(key) || 0) * 120;
+        score += (sessionToolSuccesses.get(key) || 0) * 60;
+        score -= (sessionToolFailures.get(key) || 0) * 120;
       }
-      if (quarantined) rank -= 1_000_000;
-      return { model, rank };
+      return { provider, model, score, quarantined };
     }),
   );
-  const ordered = scored
-    .sort((left, right) => right.rank - left.rank || left.model.localeCompare(right.model))
-    .map((entry) => entry.model);
+  // Walk providers in fixed priority; within a provider sort by model quality.
+  const pool = entries.sort((a, b) =>
+    providerPriorityIndex(a.provider) - providerPriorityIndex(b.provider) || b.score - a.score || a.model.localeCompare(b.model),
+  );
+  const eager: string[] = [];
+  const tail: string[] = [];
+  for (const entry of pool) {
+    (entry.quarantined ? tail : eager).push(entry.model);
+  }
+  const candidates = [...eager, ...tail];
+  // Lead the batch with one best model per provider so it gracefully walks
+  // airforce -> opencode -> kilo -> ... in a single pass rather than burning the
+  // whole (truncated) batch inside the first provider.
+  const leaders: string[] = [];
+  const rest: string[] = [];
+  const seenLeadingProvider = new Set<string>();
+  for (const model of candidates) {
+    const providerId = model.split("/", 1)[0];
+    if (!seenLeadingProvider.has(providerId)) {
+      seenLeadingProvider.add(providerId);
+      leaders.push(model);
+    } else {
+      rest.push(model);
+    }
+  }
+  const ordered = [...leaders, ...rest];
   const configured = parseModels(process.env.OMNIROUTE_AI_AUTO_MODELS || "");
   if (configured.length) return configured.filter((model) => ordered.includes(model));
   return ordered;
