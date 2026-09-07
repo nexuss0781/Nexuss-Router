@@ -73,6 +73,23 @@ async function cached<T>(key: string, loader: () => Promise<T>): Promise<T> {
 export function invalidateGatewayCache() { cache.clear(); }
 export function hasSupabaseGateway() { return Boolean(config()); }
 
+export type SupabaseHealth = { configured: boolean; reachable: boolean; tablesMissing: boolean; error?: string };
+export async function checkSupabaseHealth(): Promise<SupabaseHealth> {
+  const c = config();
+  if (!c) return { configured: false, reachable: false, tablesMissing: false };
+  try {
+    const response = await fetch(`${c.url}/rest/v1/ai_provider_connections?select=id&limit=1`, {
+      headers: { apikey: c.key, authorization: `Bearer ${c.key}`, "content-type": "application/json" },
+    });
+    if (response.ok) return { configured: true, reachable: true, tablesMissing: false };
+    const text = await response.text().catch(() => "");
+    if (response.status === 404 && text.includes("PGRST205")) return { configured: true, reachable: true, tablesMissing: true, error: text.slice(0, 200) };
+    return { configured: true, reachable: false, tablesMissing: false, error: `Supabase ${response.status}: ${text.slice(0, 200)}` };
+  } catch (error) {
+    return { configured: true, reachable: false, tablesMissing: false, error: error instanceof Error ? error.message.slice(0, 200) : String(error) };
+  }
+}
+
 export async function listHotProviders(): Promise<SupabaseProvider[]> {
   return hot("providers", async () => {
     const rows = await (await request("ai_provider_connections?enabled=eq.true&select=*&order=priority.asc,provider_id.asc")).json() as any[];

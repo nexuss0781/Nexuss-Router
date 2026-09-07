@@ -1,5 +1,6 @@
 import {
   getAiOnlyModels,
+  getAiGatewayHealth,
   handleAiOnlyChatCompletions,
   handleAiOnlyJsonEndpoint,
   handleAiOnlyMultipartEndpoint,
@@ -27,6 +28,6 @@ export function multipartRoute(endpointName: string, options: Record<string, unk
   return (request: Request) => handleAiOnlyMultipartEndpoint(request, endpointName, {}, { endpointName, ...options });
 }
 
-export { getAiOnlyModels, handleAiOnlyChatCompletions };
+export { getAiOnlyModels, handleAiOnlyChatCompletions, getAiGatewayHealth };
 export { handleAiOnlyFileUpload, handleAiOnlyFileList, handleAiOnlyFileMetadata, handleAiOnlyFileContent, handleAiOnlyFileDelete };
 export { handleAiJobCreate, handleAiJobList, handleAiJobGet, handleAiJobCancel, handleAiJobRetry, handleAiJobComplete };
