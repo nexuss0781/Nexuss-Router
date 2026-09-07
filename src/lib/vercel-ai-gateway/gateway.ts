@@ -559,17 +559,18 @@ export async function getAiOnlyModels(request: Request, dependencies: ParadReque
 export async function getAiGatewayHealth(dependencies: ParadRequestDependencies = {}) {
   const supabase = await checkSupabaseHealth();
   const providers = await listProviders(dependencies);
-  const modelCount = providers.reduce((total, provider) => total + provider.models.filter((id) => !isExcludedModel(provider.id, id)).length, 0);
+  const uniqueProviders = providers.filter((provider, index, all) => all.findIndex((candidate) => candidate.id === provider.id) === index);
+  const modelCount = uniqueProviders.reduce((total, provider) => total + provider.models.filter((id) => !isExcludedModel(provider.id, id)).length, 0);
   const gatewayKey = Boolean(process.env.OMNIROUTE_AI_API_KEY?.trim());
-  const providerCatalogOk = providers.length > 0;
+  const providerCatalogOk = uniqueProviders.length > 0;
   // Supabase is an optimization. The gateway only considers itself DOWN when it
   // cannot serve with any source: configured-and-unreachable Supabase with no
   // builtin fallback, or no providers at all.
   const ready = providerCatalogOk;
   const checks = [
-    { name: "gateway", status: "ok", detail: `providers:${providers.length} models:${modelCount} key_config:${gatewayKey ? "env" : "none"}` },
-    { name: "supabase", status: supabase.configured ? supabase.reachable ? "ok" : "degraded" : "not_configured", detail: supabase.error || (supabase.tablesMissing ? "schema_missing" : supabase.reachable ? "reachable" : "configured") },
-    { name: "providers", status: providerCatalogOk ? "ok" : "down", detail: providers.map((provider) => `${provider.id}:${provider.models.length}`).join(",") || "none" },
+    { name: "gateway", status: "ok", detail: `providers:${uniqueProviders.length} models:${modelCount} key_config:${gatewayKey ? "env" : "none"}` },
+    { name: "supabase", status: supabase.configured ? supabase.reachable ? "ok" : "degraded" : "not_configured", detail: supabase.tablesMissing ? "schema_missing" : supabase.error || (supabase.reachable ? "reachable" : "configured") },
+    { name: "providers", status: providerCatalogOk ? "ok" : "down", detail: uniqueProviders.map((provider) => `${provider.id}:${provider.models.filter((id) => !isExcludedModel(provider.id, id)).length}`).join(",") || "none" },
   ];
   return jsonResponse({ status: ready ? "ok" : "degraded", ready, uptime: process.uptime(), checks }, ready ? 200 : 503);
 }
