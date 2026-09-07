@@ -442,9 +442,14 @@ function extractUsage(payload: any): { inputTokens: number | null; outputTokens:
   };
 }
 
-function hasUsableAssistantText(payload: any): boolean {
-  const content = payload?.choices?.[0]?.message?.content;
-  return typeof content === "string" && Boolean(content.trim());
+function hasUsableAssistantText(payload: any, acceptToolCalls = false): boolean {
+  const message = payload?.choices?.[0]?.message;
+  const content = message?.content;
+  if (typeof content === "string" && Boolean(content.trim())) return true;
+  // A valid agent-style completion may carry tool_calls with empty content;
+  // that is a successful outcome, not an empty/malformed completion.
+  if (acceptToolCalls && Array.isArray(message?.tool_calls) && message.tool_calls.length > 0) return true;
+  return false;
 }
 
 function streamWithUsage(body: ReadableStream<Uint8Array> | null, onComplete: () => void): ReadableStream<Uint8Array> | null {
@@ -1200,7 +1205,7 @@ export async function handleAiOnlyChatCompletions(request: Request, dependencies
         const responseBody = await upstream.json().catch(() => ({ error: { message: "Provider returned invalid JSON" } }));
         await recordUsage(provider, model, "chat.completions", "succeeded", responseBody, policy, startedAt, dependencies);
         const response = jsonResponse(responseBody, upstream.status, { "x-omniroute-provider": provider.id, "x-omniroute-model": model, "x-omniroute-routing-class": phase });
-        if (isAuto && !hasUsableAssistantText(responseBody)) {
+        if (isAuto && !hasUsableAssistantText(responseBody, wantsTools)) {
           lastRetryableStatus = 502;
           lastFailureMessage = "The upstream provider returned a completion with no readable text";
           lastFailureCode = "provider_empty_completion";
