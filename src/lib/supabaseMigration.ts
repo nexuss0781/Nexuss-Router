@@ -129,11 +129,14 @@ export async function applySupabaseMigration(): Promise<MigrationResult> {
   if (!rawConnectionString || !/^postgres(ql)?:\/\//.test(rawConnectionString)) {
     return { applied: false, reason: "no_db_connection" };
   }
-  // Strip sslmode from the URL so node-postgres does not downgrade to strict
-  // certificate verification (Supabase uses a self-signed chain and connection
-  // strings frequently ship with sslmode=require/verify-full, which overrides
-  // the ssl option and fails with "self-signed certificate in certificate chain").
-  const connectionString = rawConnectionString.replace(/[?&]sslmode=[^&#]+/g, "");
+  // Remove sslmode via proper URL parsing so node-postgres does not downgrade
+  // to strict certificate verification (Supabase uses a self-signed chain and
+  // connection strings frequently ship with sslmode=require/verify-full, which
+  // overrides the ssl option and fails with "self-signed certificate in
+  // certificate chain"). Parsing with the URL API preserves the query separator.
+  const parsed = new URL(rawConnectionString);
+  parsed.searchParams.delete("sslmode");
+  const connectionString = parsed.toString();
   const client = new Client({
     connectionString,
     ssl: process.env.SUPABASE_DB_SSL === "false" ? false : { rejectUnauthorized: false },
