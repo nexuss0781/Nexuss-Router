@@ -1080,15 +1080,17 @@ function rankedProviderModels(provider: AiProvider): string[] {
 // (quarantine) to the tail; it never reorders which provider leads. When every
 // candidate is unhealthy the pool still degrades gracefully instead of hard-503ing.
 const AUTO_PROVIDER_PRIORITY = ["airforce", "opencode-zen", "kilo-gateway"];
+const TOOL_PRIORITY_LEAD = "opencode-zen";
 
-function providerPriorityIndex(provider: AiProvider): number {
+function providerPriorityIndex(provider: AiProvider, wantsTools = false): number {
+  if (wantsTools && provider.id === TOOL_PRIORITY_LEAD) return -1;
   const index = AUTO_PROVIDER_PRIORITY.indexOf(provider.id);
   return index === -1 ? AUTO_PROVIDER_PRIORITY.length : index;
 }
 
 async function autoModelCandidates(providers: AiProvider[], providerScope?: string, wantsTools = false): Promise<string[]> {
   const inScope = (provider: AiProvider) => !providerScope || provider.id === providerScope;
-  const scopedProviders = providers.filter(inScope).sort((a, b) => providerPriorityIndex(a) - providerPriorityIndex(b) || a.priority - b.priority);
+  const scopedProviders = providers.filter(inScope).sort((a, b) => providerPriorityIndex(a, wantsTools) - providerPriorityIndex(b, wantsTools) || a.priority - b.priority);
   const health = await getPoolHealth().catch(() => new Map<string, UsageHealthRow>());
   const entries = scopedProviders.flatMap((provider) =>
     rankedProviderModels(provider).map((model) => {
