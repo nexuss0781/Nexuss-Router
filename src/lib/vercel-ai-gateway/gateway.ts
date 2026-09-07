@@ -29,6 +29,7 @@ import {
   enqueueUsageEvent,
   reserveHotProviderRequest,
 } from "@/lib/supabaseGateway";
+import { applySupabaseMigration } from "@/lib/supabaseMigration";
 
 const MAX_CHAT_BODY_BYTES = 4 * 1024 * 1024;
 const MAX_PROVIDER_TIMEOUT_MS = 240_000;
@@ -557,7 +558,14 @@ export async function getAiOnlyModels(request: Request, dependencies: ParadReque
 }
 
 export async function getAiGatewayHealth(dependencies: ParadRequestDependencies = {}) {
-  const supabase = await checkSupabaseHealth();
+  let supabase = await checkSupabaseHealth();
+  let migration = { attempted: false, applied: false, detail: "not_needed" };
+  if (supabase.configured && supabase.tablesMissing) {
+    migration = { attempted: true, applied: false, detail: "attempting" };
+    const result = await applySupabaseMigration();
+    migration = { attempted: true, applied: result.applied, detail: result.message || result.reason || (result.applied ? "applied" : "not_applied") };
+    supabase = await checkSupabaseHealth();
+  }
   const providers = await listProviders(dependencies);
   const uniqueProviders = providers.filter((provider, index, all) => all.findIndex((candidate) => candidate.id === provider.id) === index);
   const modelCount = uniqueProviders.reduce((total, provider) => total + provider.models.filter((id) => !isExcludedModel(provider.id, id)).length, 0);
@@ -569,7 +577,8 @@ export async function getAiGatewayHealth(dependencies: ParadRequestDependencies 
   const ready = providerCatalogOk;
   const checks = [
     { name: "gateway", status: "ok", detail: `providers:${uniqueProviders.length} models:${modelCount} key_config:${gatewayKey ? "env" : "none"}` },
-    { name: "supabase", status: supabase.configured ? supabase.reachable ? "ok" : "degraded" : "not_configured", detail: supabase.tablesMissing ? "schema_missing" : supabase.error || (supabase.reachable ? "reachable" : "configured") },
+    { name: "migration", status: migration.attempted ? migration.applied ? "ok" : "degraded" : "ok", detail: migration.detail },
+    { name: "supabase", status: supabase.configured ? supabase.reachable ? (supabase.tablesMissing ? "degraded" : "ok") : "degraded" : "not_configured", detail: supabase.tablesMissing ? "schema_missing" : supabase.error || (supabase.reachable ? "reachable" : "configured") },
     { name: "providers", status: providerCatalogOk ? "ok" : "down", detail: uniqueProviders.map((provider) => `${provider.id}:${provider.models.filter((id) => !isExcludedModel(provider.id, id)).length}`).join(",") || "none" },
   ];
   return jsonResponse({ status: ready ? "ok" : "degraded", ready, uptime: process.uptime(), checks }, ready ? 200 : 503);
