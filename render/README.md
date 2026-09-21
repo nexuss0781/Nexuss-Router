@@ -10,7 +10,7 @@ Render runs the same Next application locally, so provider work executes on Rend
 
 ## Deployment
 
-Create the service from the repository using [`render.yaml`](../render.yaml). The service needs a persistent disk mounted at `/var/data/omniroute`, the same provider/API environment variables as Vercel, and a random `RENDER_INTERNAL_SECRET` set identically in both services. On Vercel set:
+Create the service from the repository using [`render.yaml`](../render.yaml). Render will build [`Dockerfile`](../Dockerfile), expose the port supplied through `PORT`, and mount a persistent disk at `/var/data/omniroute`. The service needs the same provider/API environment variables as Vercel and a random `RENDER_INTERNAL_SECRET` set identically in both services. On Vercel set:
 
 ```text
 RENDER_SERVICE_URL=https://<your-render-service>.onrender.com
@@ -22,8 +22,13 @@ The Vercel database migration adds `ai_render_state`, which stores the latest co
 ## Local smoke run
 
 ```bash
-npm ci
-npm run build
-PORT=10000 RENDER_DATA_DIR=/tmp/omniroute-render npm run render:start
+docker build -t omniroute-render .
+docker run --rm --name omniroute-render \
+  -p 10000:10000 \
+  -e VERCEL_URL=https://omniouter-vercel.vercel.app \
+  -e RENDER_INTERNAL_SECRET=<same-random-secret> \
+  -v omniroute-state:/var/data/omniroute \
+  omniroute-render
+
 curl http://127.0.0.1:10000/health
 ```

@@ -1,10 +1,10 @@
 services:
   - type: web
     name: omniroute-render
-    runtime: node
+    runtime: docker
     plan: starter
-    buildCommand: npm ci && npm run build
-    startCommand: npm run render:start
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
     healthCheckPath: /health
     autoDeploy: true
     disk:
