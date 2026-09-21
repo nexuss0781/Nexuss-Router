@@ -16,7 +16,7 @@ import {
   handleAiJobRetry as baseHandleAiJobRetry,
   handleAiJobComplete as baseHandleAiJobComplete,
 } from "@/lib/vercel-ai-gateway/gateway";
-import { maybeForwardToRender, renderStatus } from "@/lib/renderFailover";
+import { checkRenderHealth, maybeForwardToRender } from "@/lib/renderFailover";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -34,7 +34,11 @@ export function multipartRoute(endpointName: string, options: Record<string, unk
 }
 
 export function getAiOnlyModels(request: Request) { return route(request, () => baseGetAiOnlyModels(request)); }
-export function getAiGatewayHealth() { return renderStatus(); }
+export async function getAiGatewayHealth() {
+  const [baseResponse, render] = await Promise.all([baseGetAiGatewayHealth(), checkRenderHealth()]);
+  const baseBody = await baseResponse.json().catch(() => ({}));
+  return Response.json({ ...(baseBody as Record<string, unknown>), render });
+}
 export function handleAiOnlyChatCompletions(request: Request) { return route(request, () => baseHandleAiOnlyChatCompletions(request)); }
 export function handleAiOnlyFileUpload(request: Request) { return route(request, () => baseHandleAiOnlyFileUpload(request)); }
 export function handleAiOnlyFileList(request: Request) { return route(request, () => baseHandleAiOnlyFileList(request)); }
