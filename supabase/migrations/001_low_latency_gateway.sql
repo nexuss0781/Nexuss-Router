@@ -139,3 +139,10 @@ create or replace function public.complete_usage_batch(p_ids uuid[], p_batch_id 
 returns void language sql security definer set search_path = public as $$
 update public.ai_usage_queue set state=case when p_error is null then 'synced' else case when attempts >= 5 then 'dead_letter' else 'pending' end end, batch_id=p_batch_id, last_error=p_error, lease_id=null, lease_expires_at=null where id=any(p_ids);
 $$;
+
+create table if not exists public.ai_render_state (
+  id text primary key,
+  state_json jsonb not null,
+  reason text,
+  updated_at timestamptz not null default now()
+);

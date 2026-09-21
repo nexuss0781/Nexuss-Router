@@ -4,6 +4,7 @@
   "scripts": {
     "build": "next build",
     "start": "next start",
+    "render:start": "node render/server.mjs",
     "db:migrate": "node scripts/migrate-supabase.mjs"
   },
   "dependencies": {

@@ -1,0 +1,36 @@
+services:
+  - type: web
+    name: omniroute-render
+    runtime: node
+    plan: starter
+    buildCommand: npm ci && npm run build
+    startCommand: npm run render:start
+    healthCheckPath: /health
+    autoDeploy: true
+    disk:
+      name: omniroute-state
+      mountPath: /var/data/omniroute
+      sizeGB: 1
+    envVars:
+      - key: NODE_VERSION
+        value: "22.22.2"
+      - key: VERCEL_URL
+        value: https://omniouter-vercel.vercel.app
+      - key: RENDER_DATA_DIR
+        value: /var/data/omniroute
+      - key: RENDER_INTERNAL_SECRET
+        sync: false
+      - key: OMNIROUTE_AI_API_KEY
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: RENDER_FORWARDING_DISABLED
+        value: "true"
+      - key: RENDER_LONG_POLL_MS
+        value: "250"
+      - key: RENDER_IDLE_FLUSH_MS
+        value: "30000"
