@@ -19,6 +19,25 @@ let writeChain = Promise.resolve();
 let lastActivity = Date.now();
 let idleFlushInFlight = false;
 
+async function loadRuntimeConfig() {
+  if (!INTERNAL_SECRET) return;
+  try {
+    const response = await fetch(`${VERCEL_URL}/api/internal/render-config`, {
+      headers: { authorization: `Bearer ${INTERNAL_SECRET}`, accept: "application/json" },
+      signal: AbortSignal.timeout(10000),
+      cache: "no-store",
+    });
+    if (!response.ok) throw new Error(`config_http_${response.status}`);
+    const payload = await response.json();
+    for (const key of ["OMNIROUTE_AI_API_KEY", "OMNIROUTE_VERCEL_PROFILE", "DATABASE_URL", "PARADOX_PASSPHRASE", "PARADOX_API_KEY"]) {
+      if (typeof payload?.values?.[key] === "string" && payload.values[key]) process.env[key] = payload.values[key];
+    }
+    console.log("runtime config loaded from Vercel");
+  } catch (error) {
+    console.error(`runtime config unavailable: ${error instanceof Error ? error.message : "unknown_error"}`);
+  }
+}
+
 async function persist() {
   writeChain = writeChain.then(async () => { const tmp = `${STATE_FILE}.${process.pid}.tmp`; await writeFile(tmp, JSON.stringify(state, null, 2), "utf8"); await rename(tmp, STATE_FILE); });
   return writeChain;
@@ -47,6 +66,7 @@ async function proxyToVercel(req, res, body) {
   finally { clearTimeout(timer); }
 }
 
+await loadRuntimeConfig();
 await loadState();
 const app = next({ dev: false, dir: process.cwd(), hostname: "0.0.0.0", port: PORT });
 await app.prepare();

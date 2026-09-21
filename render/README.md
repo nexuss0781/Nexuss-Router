@@ -19,6 +19,8 @@ RENDER_INTERNAL_SECRET=<same-random-secret>
 
 The Vercel database migration adds `ai_render_state`, which stores the latest compact idle snapshot when Supabase is configured. Render itself does not use Supabase for its local request journal.
 
+On the free Render plan, do not configure the gateway credentials in Render. At every boot, Render retrieves `OMNIROUTE_AI_API_KEY`, `OMNIROUTE_VERCEL_PROFILE`, `DATABASE_URL`, `PARADOX_PASSPHRASE`, and `PARADOX_API_KEY` from the protected Vercel `/api/internal/render-config` route and keeps them only in process memory. They are not written to the ephemeral filesystem. Render only needs `VERCEL_URL` and `RENDER_INTERNAL_SECRET`.
+
 ## Local smoke run
 
 ```bash

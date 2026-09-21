@@ -20,14 +20,6 @@ services:
         value: /var/data/omniroute
       - key: RENDER_INTERNAL_SECRET
         sync: false
-      - key: OMNIROUTE_AI_API_KEY
-        sync: false
-      - key: DATABASE_URL
-        sync: false
-      - key: SUPABASE_URL
-        sync: false
-      - key: SUPABASE_SERVICE_ROLE_KEY
-        sync: false
       - key: RENDER_FORWARDING_DISABLED
         value: "true"
       - key: RENDER_LONG_POLL_MS
