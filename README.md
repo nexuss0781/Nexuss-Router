@@ -6,7 +6,7 @@
 
 [![Next.js](https://img.shields.io/badge/Next.js-16.3.1-000000?style=flat-square&logo=next.js)](https://nextjs.org)
 [![React](https://img.shields.io/badge/React-19.2-087ea4?style=flat-square&logo=react)](https://react.dev)
-[![TypeScript](https://img.shields.io/badge/TypeScript-7.0-2-3178c6?style=flat-square&logo=typescript)](https://www.typescriptlang.org)
+[![TypeScript](https://shields.io)](https://www.typescriptlang.org)
 [![Node](https://img.shields.io/badge/Node-%3E%3D22.22.2-5fa04e?style=flat-square&logo=node.js)](https://nodejs.org)
 [![Supabase](https://img.shields.io/badge/Supabase-PostgreSQL-3ecf8e?style=flat-square&logo=supabase)](https://supabase.com)
 
