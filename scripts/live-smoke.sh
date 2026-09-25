@@ -18,6 +18,7 @@ check() {
   esac
 }
 
+check "health" GET /api/v1/health
 check "models" GET /api/v1/models
 check "files list" GET /api/v1/files
 check "jobs list" GET /api/v1/jobs
@@ -38,6 +39,8 @@ check "audio transcription" GET /api/v1/audio/transcriptions
 check "video generation" GET /api/v1/videos/generations
 check "music generation" GET /api/v1/music/generations
 check "ocr route" GET /api/v1/ocr
-check "chat completion" POST /api/v1/chat/completions '{"model":"opencode-zen/big-pickle","messages":[{"role":"user","content":"Reply with exactly: smoke-ok"}],"stream":false}'
+check "chat completion" POST /api/v1/chat/completions '{"model":"auto","messages":[{"role":"user","content":"Reply with exactly: smoke-ok"}],"stream":false}'
+check "chat explicit model" POST /api/v1/chat/completions '{"model":"kilo-gateway/nvidia/nemotron-3-super-120b-a12b:free","messages":[{"role":"user","content":"Reply with exactly: smoke-ok"}],"stream":false}'
+check "chat tool call" POST /api/v1/chat/completions '{"model":"auto","messages":[{"role":"user","content":"What is the weather in Oslo? Use the tool."}],"tools":[{"type":"function","function":{"name":"get_weather","description":"Get weather","parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}}],"tool_choice":"auto"}'
 printf 'SUMMARY pass=%s fail=%s\n' "$pass" "$fail"
 [[ "$fail" -eq 0 ]]

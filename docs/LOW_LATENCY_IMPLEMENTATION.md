@@ -1,10 +1,10 @@
-# OmniRoute Low-Latency Gateway: Complete Implementation Record
+# Nexuss AI Router (NAR) — Low-Latency Gateway: Implementation Record
 
 **Status:** Implemented and pushed to the `main` branch. The latest implementation commit is `174d906`.
 
 ## Executive summary
 
-OmniRoute now uses a Vercel-compatible low-latency gateway design in which Supabase stores hot configuration, authorization policies, atomic provider limits, and a durable usage queue. Parad is removed from synchronous chat handling whenever Supabase is configured. Parad remains the durable archive target and is written by a secured worker that runs every five minutes.
+Nexuss AI Router now uses a Vercel-compatible low-latency gateway design in which Supabase stores hot configuration, authorization policies, atomic provider limits, and a durable usage queue. Parad is removed from synchronous chat handling whenever Supabase is configured. Parad remains the durable archive target and is written by a secured worker that runs every five minutes.
 
 The request path authenticates the caller, reads cached routing state, selects an eligible provider and model, invokes the upstream provider with a bounded deadline, and streams the response. Usage accounting is enqueued asynchronously. The browser never receives provider credentials, Supabase service-role credentials, or the Parad API key.
 

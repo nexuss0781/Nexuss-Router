@@ -1,6 +1,6 @@
 # Render worker
 
-This directory contains the Render runtime for OmniRoute.
+This directory contains the Render runtime for Nexuss AI Router.
 
 ## Request strategy
 

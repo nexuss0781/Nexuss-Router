@@ -1,11 +1,11 @@
 ---
-name: omniroute-ai-inference
-description: Use a ready OmniRoute deployment as the single AI inference endpoint. Apply when an agent receives an OmniRoute domain or API base and needs to discover live models, choose Auto or an exact model, make chat, text, embedding, generation, media, search, or job requests, and return the result immediately.
+name: nexuss-ai-router
+description: Use a ready Nexuss AI Router deployment as the single AI inference endpoint. Apply when an agent receives an Nexuss AI Router domain or API base and needs to discover live models, choose Auto or an exact model, make chat, text, embedding, generation, media, search, or job requests, and return the result immediately.
 ---
 
-# OmniRoute AI Inference
+# Nexuss AI Router (NAR) — AI Inference
 
-Use the ready OmniRoute deployment as one direct AI interface. The calling runtime already carries its gateway access. Begin inference immediately with the deployed endpoint supplied by the host.
+Use the ready Nexuss AI Router deployment as one direct AI interface. The calling runtime already carries its gateway access. Begin inference immediately with the deployed endpoint supplied by the host.
 
 ## Start here
 
@@ -38,7 +38,7 @@ Use the host's ready gateway client for every request. Send all paths below rela
 
 ### Automatic selection
 
-Use Auto for the normal default. OmniRoute selects a currently eligible route and performs its internal fallback sequence.
+Use Auto for the normal default. Nexuss AI Router selects a currently eligible route and performs its internal fallback sequence.
 
 ```json
 {

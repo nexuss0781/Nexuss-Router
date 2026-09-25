@@ -44,7 +44,12 @@ export function getAiOnlyModels(request: Request) { return route(request, () => 
 export async function getAiGatewayHealth() {
   const [baseResponse, render] = await Promise.all([baseGetAiGatewayHealth(), checkRenderHealth()]);
   const baseBody = await baseResponse.json().catch(() => ({}));
-  return Response.json({ ...(baseBody as Record<string, unknown>), render });
+  return Response.json({
+    service: "Nexuss AI Router",
+    product: "NAR",
+    ...(baseBody as Record<string, unknown>),
+    render,
+  });
 }
 export function handleAiOnlyChatCompletions(request: Request, options: { providerId?: string } = {}) { return route(request, () => baseHandleAiOnlyChatCompletions(request, {}, options)); }
 export function handleAiOnlyFileUpload(request: Request) { return route(request, () => baseHandleAiOnlyFileUpload(request)); }

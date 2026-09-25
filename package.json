@@ -1,11 +1,14 @@
 {
-  "name": "omniroute-ai-only-vercel",
+  "name": "nexuss-ai-router",
+  "version": "0.1.0",
   "private": true,
+  "description": "Nexuss AI Router (NAR) - an OpenAI-compatible multi-provider AI gateway with dynamic model routing, tool-call affinity, and health-aware failover.",
   "scripts": {
     "build": "next build",
     "start": "next start",
     "render:start": "node render/server.mjs",
-    "db:migrate": "node scripts/migrate-supabase.mjs"
+    "db:migrate": "node scripts/migrate-supabase.mjs",
+    "smoke": "bash scripts/live-smoke.sh"
   },
   "dependencies": {
     "next": "16.3.1",

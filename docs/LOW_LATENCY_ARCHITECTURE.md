@@ -1,4 +1,4 @@
-# OmniRoute Low-Latency Architecture
+# Nexuss AI Router (NAR) — Low-Latency Architecture
 
 **Status:** Approved design baseline before implementation  
 **Target:** Reduce gateway overhead for agentic workloads while preserving durable configuration, usage records, and Parad synchronization.
