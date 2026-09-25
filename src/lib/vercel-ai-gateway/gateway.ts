@@ -1,6 +1,6 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import type { ParadRequestDependencies } from "@/lib/vercel-parad/index.ts";
-import { getAiModelMetadata, listAiModelIds } from "./modelMetadata";
+import { getAiModelMetadata } from "./modelMetadata";
 import {
   listApiKeyPolicies,
   listProviderConnections,
@@ -14,8 +14,6 @@ import {
   listAiJobs,
   updateAiJob,
   recordAiUsageEvent,
-  reserveProviderRequest,
-  type ProviderRequestReservation,
   type AiApiKeyPolicy,
   type ProviderConnectionRecord,
 } from "./repositories.ts";
@@ -28,7 +26,6 @@ import {
   listHotModelOverrides,
   listHotProviders,
   enqueueUsageEvent,
-  reserveHotProviderRequest,
   type UsageHealthRow,
 } from "@/lib/supabaseGateway";
 import { applySupabaseMigration, SCHEMA_VERSION } from "@/lib/supabaseMigration";
@@ -63,8 +60,6 @@ import {
 
 const MAX_CHAT_BODY_BYTES = 4 * 1024 * 1024;
 const MAX_PROVIDER_TIMEOUT_MS = 240_000;
-const AIRFORCE_MINIMUM_REQUEST_INTERVAL_MS = 60_000;
-const AIRFORCE_DAILY_REQUEST_LIMIT = 1_000;
 
 export type AiProvider = {
   id: string;
@@ -133,40 +128,6 @@ function envProvider(): AiProvider | null {
 
 const BUILTIN_OPTIONAL_PROVIDERS: AiProvider[] = [
   {
-    id: "opencode-zen",
-    baseUrl: "https://opencode.ai/zen/v1",
-    apiKey: "",
-    format: "openai",
-    priority: 1000,
-    models: [
-      "big-pickle",
-      "deepseek-v4-flash-free",
-      "mimo-v2.5-free",
-      "hy3-free",
-      "nemotron-3-ultra-free",
-      "nemotron-3.5-lightning-free",
-      "laguna-s-2.1-free",
-    ],
-  },
-  {
-    id: "pollinations",
-    baseUrl: "https://gen.pollinations.ai/v1",
-    apiKey: "",
-    format: "openai",
-    priority: 990,
-    models: [
-      "openai-fast",
-      "openai-large",
-      "qwen-coder",
-      "mistral",
-      "deepseek",
-      "grok",
-      "gemini-flash-lite-3.1",
-      "perplexity-fast",
-      "perplexity-reasoning",
-    ],
-  },
-  {
     id: "kilo-gateway",
     baseUrl: "https://api.kilo.ai/api/gateway",
     apiKey: "",
@@ -179,58 +140,11 @@ const BUILTIN_OPTIONAL_PROVIDERS: AiProvider[] = [
       "arcee-ai/trinity-large-preview:free",
     ],
   },
-  {
-    id: "openrouter",
-    baseUrl: "https://openrouter.ai/api/v1",
-    apiKey: "",
-    format: "openai",
-    priority: 1020,
-    models: ["openrouter/free"],
-  },
-  {
-    id: "airforce",
-    baseUrl: "https://api.airforce/v1",
-    apiKey: "",
-    format: "openai",
-    priority: 1030,
-    models: [
-      "codestral-2508", "codestral-latest", "devstral-2512", "devstral-latest", "devstral-medium-latest", "gemma-4-26b-a4b-it", "gemma3-270m:free", "glm-4.7-flash", "gpt-oss-120b", "gpt-oss-20b", "kimi-k2.7-code", "llama-3.3-70b-instruct-fp8-fast", "llama-4-scout-17b-16e-instruct", "magistral-small-latest", "ministral-14b-2512", "ministral-14b-latest", "ministral-3b-2512", "ministral-3b-latest", "ministral-8b-2512", "ministral-8b-latest", "mistral-code-agent-latest", "mistral-code-fim-latest", "mistral-code-latest", "mistral-large-2512", "mistral-large-latest", "mistral-medium", "mistral-medium-2505", "mistral-medium-2508", "mistral-medium-2604", "mistral-medium-3", "mistral-medium-3.5", "mistral-medium-latest", "mistral-small-2506", "mistral-small-2603", "mistral-small-3.1-24b-instruct", "mistral-small-latest", "mistral-tiny-2407", "mistral-tiny-latest", "mistral-vibe-cli-fast", "mistral-vibe-cli-latest", "mistral-vibe-cli-with-tools", "open-mistral-nemo", "open-mistral-nemo-2407", "qwen3-30b-a3b-fp8", "rnj-1", "suno-v4.5", "suno-v5", "unmoderated-gpt", "voxtral-small-2507", "voxtral-small-latest",
-    ],
-  },
-  {
-    id: "g4f-pollinations",
-    baseUrl: "https://g4f.space/v1",
-    apiKey: "",
-    format: "openai",
-    priority: 970,
-    models: ["openai", "openai-fast"],
-  },
 ];
 
-// G4F can list routes that remain account- or provider-gated at completion time.
-// Retain private configuration for future restoration, but do not discover, expose, or route through it.
-const DISABLED_PROVIDER_IDS = new Set(["g4f-pollinations"]);
-const EXCLUDED_OPENROUTER_MODELS = new Set([
-  "dots-studio/dots-3-note-preview:free",
-  "nvidia/nemotron-3-ultra-550b-a55b:free",
-  "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
-]);
 const EXCLUDED_ORIGINAL_MODELS = new Set([
   "kilo-gateway/minimax/minimax-m2.5:free",
   "kilo-gateway/arcee-ai/trinity-large-preview:free",
-  "pollinations/openai-fast",
-  "pollinations/openai-large",
-  "pollinations/qwen-coder",
-  "pollinations/mistral",
-  "pollinations/deepseek",
-  "pollinations/grok",
-  "pollinations/gemini-flash-lite-3.1",
-  "pollinations/perplexity-fast",
-  "pollinations/perplexity-reasoning",
-  "opencode-zen/big-pickle",
-  "opencode-zen/deepseek-v4-flash-free",
-  "opencode-zen/nemotron-3-ultra-free",
-  "opencode-zen/nemotron-3.5-lightning-free",
 ]);
 
 function parseModels(value: unknown): string[] {
@@ -254,95 +168,15 @@ type BuiltinProviderEnv = {
 
 const BUILTIN_PROVIDER_ENV: BuiltinProviderEnv[] = [
   {
-    providerId: "opencode-zen",
-    apiKeyNames: ["OMNIROUTE_OPENCODE_ZEN_API_KEY", "OPENCODE_ZEN_API_KEY", "OPENCODE_API_KEY"],
-    baseUrlNames: ["OMNIROUTE_OPENCODE_ZEN_BASE_URL", "OPENCODE_ZEN_BASE_URL", "OPENCODE_BASE_URL"],
-    modelsNames: ["OMNIROUTE_OPENCODE_ZEN_MODELS", "OPENCODE_ZEN_MODELS", "OPENCODE_MODELS"],
-  },
-  {
-    providerId: "pollinations",
-    apiKeyNames: ["OMNIROUTE_POLLINATIONS_API_KEY", "POLLINATIONS_API_KEY"],
-    baseUrlNames: ["OMNIROUTE_POLLINATIONS_BASE_URL", "POLLINATIONS_BASE_URL"],
-    modelsNames: ["OMNIROUTE_POLLINATIONS_MODELS", "POLLINATIONS_MODELS"],
-  },
-  {
     providerId: "kilo-gateway",
     apiKeyNames: ["OMNIROUTE_KILO_API_KEY", "KILO_GATEWAY_API_KEY", "KILO_API_KEY"],
     baseUrlNames: ["OMNIROUTE_KILO_BASE_URL", "KILO_GATEWAY_BASE_URL", "KILO_BASE_URL"],
     modelsNames: ["OMNIROUTE_KILO_MODELS", "KILO_GATEWAY_MODELS", "KILO_MODELS"],
   },
-  {
-    providerId: "openrouter",
-    apiKeyNames: ["OMNIROUTE_OPENROUTER_API_KEY", "OPENROUTER_API_KEY"],
-    baseUrlNames: ["OMNIROUTE_OPENROUTER_BASE_URL", "OPENROUTER_BASE_URL"],
-    modelsNames: ["OMNIROUTE_OPENROUTER_MODELS", "OPENROUTER_MODELS"],
-  },
-  {
-    providerId: "airforce",
-    apiKeyNames: ["OMNIROUTE_AIRFORCE_API_KEY", "AIRFORCE_API_KEY"],
-    baseUrlNames: ["OMNIROUTE_AIRFORCE_BASE_URL", "AIRFORCE_BASE_URL"],
-    modelsNames: ["OMNIROUTE_AIRFORCE_MODELS", "AIRFORCE_MODELS"],
-  },
-  {
-    providerId: "g4f-pollinations",
-    apiKeyNames: ["OMNIROUTE_G4F_API_KEY", "G4F_POLLINATIONS_API_KEY", "G4F_API_KEY"],
-    baseUrlNames: ["OMNIROUTE_G4F_BASE_URL", "G4F_POLLINATIONS_BASE_URL", "G4F_BASE_URL"],
-    modelsNames: ["OMNIROUTE_G4F_MODELS", "G4F_POLLINATIONS_MODELS", "G4F_MODELS"],
-  },
 ];
 
-async function discoverG4fModels(baseUrl: string, apiKey: string): Promise<string[]> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 8_000);
-  try {
-    const response = await fetch(`${baseUrl}/models`, {
-      headers: { authorization: `Bearer ${apiKey}` },
-      signal: controller.signal,
-    });
-    if (!response.ok) return [];
-    const payload = await response.json().catch(() => null) as { data?: unknown } | null;
-    if (!Array.isArray(payload?.data)) return [];
-    return payload.data
-      .map((item) => typeof item === "string" ? item : (item && typeof item === "object" && "id" in item && typeof item.id === "string" ? item.id : ""))
-      .filter(Boolean)
-      .slice(0, 1_000);
-  } catch {
-    return [];
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
-function isZeroPrice(value: unknown): boolean {
-  return typeof value === "number" ? value === 0 : typeof value === "string" && Number(value) === 0;
-}
-
-async function discoverOpenRouterFreeModels(baseUrl: string, apiKey: string): Promise<string[]> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 12_000);
-  try {
-    const response = await fetch(`${baseUrl}/models`, {
-      headers: { authorization: `Bearer ${apiKey}` },
-      signal: controller.signal,
-    });
-    if (!response.ok) return [];
-    const payload = await response.json().catch(() => null) as { data?: unknown } | null;
-    if (!Array.isArray(payload?.data)) return [];
-    return payload.data
-      .filter((item): item is { id: string; pricing?: { prompt?: unknown; completion?: unknown } } => Boolean(item) && typeof item === "object" && "id" in item && typeof item.id === "string")
-      .filter((item) => isZeroPrice(item.pricing?.prompt) && isZeroPrice(item.pricing?.completion))
-      .map((item) => item.id)
-      .filter(Boolean)
-      .slice(0, 1_000);
-  } catch {
-    return [];
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
 async function envConfiguredBuiltinProviders(): Promise<AiProvider[]> {
-  const providers = await Promise.all(BUILTIN_PROVIDER_ENV.filter((mapping) => !DISABLED_PROVIDER_IDS.has(mapping.providerId)).map(async (mapping) => {
+  const providers = await Promise.all(BUILTIN_PROVIDER_ENV.map(async (mapping) => {
     const builtin = BUILTIN_OPTIONAL_PROVIDERS.find((provider) => provider.id === mapping.providerId);
     const apiKey = firstEnv(...mapping.apiKeyNames);
     if (!builtin || !apiKey) return null;
@@ -388,27 +222,16 @@ async function listProviders(dependencies: ParadRequestDependencies = {}): Promi
   const fallback = envProvider();
   const envBuiltins = await envConfiguredBuiltinProviders();
   const configuredIds = new Set(configured.map((provider) => provider.id));
-  const builtins = BUILTIN_OPTIONAL_PROVIDERS.filter((provider) => !DISABLED_PROVIDER_IDS.has(provider.id) && provider.id !== "openrouter" && provider.id !== "airforce" && (provider.id === "opencode-zen" || !configuredIds.has(provider.id)));
-  const all = [...configured, ...(fallback ? [fallback] : []), ...envBuiltins, ...builtins].map((provider) => {
-    if (provider.id !== "g4f-pollinations") return provider;
-    const taxonomyModels = listAiModelIds(provider.id).map((id) => id.slice(provider.id.length + 1));
-    return { ...provider, models: Array.from(new Set([...provider.models, ...taxonomyModels])) };
-  });
+  const builtins = BUILTIN_OPTIONAL_PROVIDERS.filter((provider) => !configuredIds.has(provider.id));
+  const all = [...configured, ...(fallback ? [fallback] : []), ...envBuiltins, ...builtins];
   const deduped = all
-    .filter((provider) => !DISABLED_PROVIDER_IDS.has(provider.id))
     .filter((provider, index, values) => values.findIndex((candidate) => candidate.id === provider.id && candidate.baseUrl === provider.baseUrl && Boolean(candidate.apiKey) === Boolean(provider.apiKey)) === index);
   return deduped.sort((left, right) => (left.priority - right.priority));
 }
 
 function isExcludedModel(providerId: string, model: string): boolean {
   const providerQualifiedModel = model.startsWith(`${providerId}/`) ? model : `${providerId}/${model}`;
-  if (EXCLUDED_ORIGINAL_MODELS.has(providerQualifiedModel)) return true;
-  if (providerId === "pollinations") return model === "openai" || model === "pollinations/openai";
-  if (providerId === "openrouter") {
-    const unqualifiedModel = model.startsWith("openrouter/") ? model.slice("openrouter/".length) : model;
-    return EXCLUDED_OPENROUTER_MODELS.has(unqualifiedModel);
-  }
-  return false;
+  return EXCLUDED_ORIGINAL_MODELS.has(providerQualifiedModel);
 }
 
 function modelMatches(provider: AiProvider, model: string): boolean {
@@ -552,30 +375,6 @@ async function recordUsage(provider: AiProvider, model: string, endpoint: string
   else void recordAiUsageEvent(event, dependencies).catch(() => undefined);
 }
 
-function providerRateLimitResponse(reservation: ProviderRequestReservation): Response {
-  const scope = reservation.reason === "daily" ? "daily" : "per-minute";
-  return errorResponse(
-    429,
-    `Airforce ${scope} request limit reached`,
-    "provider_rate_limited",
-    {
-      "retry-after": String(reservation.retryAfterSeconds),
-      "x-ratelimit-limit": String(reservation.dailyRequestLimit),
-      "x-ratelimit-remaining": String(Math.max(0, reservation.dailyRequestLimit - reservation.dailyRequestCount)),
-    },
-  );
-}
-
-async function reserveProviderUpstreamRequest(provider: AiProvider, dependencies: ParadRequestDependencies): Promise<ProviderRequestReservation | null> {
-  if (provider.id !== "airforce") return null;
-  const limits = {
-    minimumIntervalMs: AIRFORCE_MINIMUM_REQUEST_INTERVAL_MS,
-    dailyRequestLimit: AIRFORCE_DAILY_REQUEST_LIMIT,
-  };
-  if (hasSupabaseGateway()) return reserveHotProviderRequest(provider.id, limits) as Promise<ProviderRequestReservation>;
-  return reserveProviderRequest(provider.id, limits, dependencies);
-}
-
 export async function getAiOnlyModels(request: Request, dependencies: ParadRequestDependencies = {}) {
   const { response } = await authenticateGatewayRequest(request, dependencies);
   if (response) return response;
@@ -637,13 +436,7 @@ export type AiJsonEndpointOptions = {
 function upstreamHeaders(provider: AiProvider): Record<string, string> {
   const headers: Record<string, string> = { "content-type": "application/json" };
   if (provider.apiKey) headers.authorization = `Bearer ${provider.apiKey}`;
-  if (provider.id === "opencode-zen") {
-    headers["user-agent"] = process.env.OPENCODE_USER_AGENT?.trim() || "opencode";
-    headers["x-opencode-client"] = process.env.OPENCODE_CLIENT?.trim() || "desktop";
-    headers["x-opencode-project"] = process.env.OPENCODE_PROJECT?.trim() || "global";
-    headers["x-opencode-request"] = randomUUID();
-    headers["x-opencode-session"] = randomUUID();
-  }
+
   if (provider.format.toLowerCase().includes("claude") || provider.format.toLowerCase().includes("anthropic")) {
     delete headers.authorization;
     headers["x-api-key"] = provider.apiKey;
@@ -691,13 +484,6 @@ export async function handleAiOnlyJsonEndpoint(
   const failures: UpstreamFailure[] = [];
   for (const provider of candidates) {
     if (isProviderCoolingDown(provider, model)) continue;
-    const reservation = await reserveProviderUpstreamRequest(provider, dependencies);
-    if (reservation && !reservation.allowed) {
-      failures.push({ retryable: true, code: "provider_rate_limited", message: "The provider request limit was reached" });
-      noteProviderFailure(provider, model, 429);
-      if (candidates.length === 1 || options.providerId) break;
-      continue;
-    }
     const upstreamModel = model === "auto" ? model : providerModel(model, provider);
     const upstreamBody = model === "auto" || typeof body.model !== "string" ? body : { ...body, model: upstreamModel };
     const upstreamUrl = `${provider.baseUrl}/${upstreamPath}`;
@@ -787,13 +573,6 @@ export async function handleAiOnlyMultipartEndpoint(
   const failures: UpstreamFailure[] = [];
   for (const provider of candidates) {
     if (isProviderCoolingDown(provider, model)) continue;
-    const reservation = await reserveProviderUpstreamRequest(provider, dependencies);
-    if (reservation && !reservation.allowed) {
-      failures.push({ retryable: true, code: "provider_rate_limited", message: "The provider request limit was reached" });
-      noteProviderFailure(provider, model, 429);
-      if (candidates.length === 1 || options.providerId) break;
-      continue;
-    }
     const upstreamModel = model === "auto" ? model : providerModel(model, provider);
     const upstreamBody = new FormData();
     for (const [key, value] of form.entries()) {
@@ -979,7 +758,7 @@ function autoModelScore(provider: AiProvider, model: string): number {
   if (!["text-chat", "text-chat-vision-candidate"].includes(metadata.modality)) return Number.NEGATIVE_INFINITY;
   const source = model.slice(`${provider.id}/`.length).toLowerCase();
   if (source === "auto" || source.includes("auto/free")) return Number.NEGATIVE_INFINITY;
-  let score = provider.id === "opencode-zen" ? 6_000 : provider.id === "kilo-gateway" ? 4_000 : 2_000;
+  let score = 4_000;
   score += metadata.quality_tier === "strong-candidate" ? 500 : metadata.quality_tier === "curated-free" ? 450 : metadata.quality_tier === "curated-gateway" ? 400 : metadata.quality_tier === "community-experimental" ? 100 : 200;
   const modelSignals: Array<[RegExp, number]> = [
     [/claude/, 1_200],
@@ -1014,17 +793,14 @@ function rankedProviderModels(provider: AiProvider): string[] {
     .sort((left, right) => autoModelScore(provider, right) - autoModelScore(provider, left) || left.localeCompare(right));
 }
 
-// Adaptive auto pool: dynamic discovery (whatever each scoped provider can serve
-// today) + runtime telemetry, BUT in a fixed provider priority order. auto always
-// tries airforce first, then opencode-zen, then kilo-gateway, then every other
-// provider — as one batch pass. Telemetry only demotes demonstrably broken routes
-// (quarantine) to the tail; it never reorders which provider leads. When every
-// candidate is unhealthy the pool still degrades gracefully instead of hard-503ing.
-const AUTO_PROVIDER_PRIORITY = ["airforce", "opencode-zen", "kilo-gateway"];
-const TOOL_PRIORITY_LEAD = "opencode-zen";
+// Adaptive auto pool: dynamic discovery (whatever the provider can serve today)
+// + runtime telemetry, in a fixed provider priority order. Telemetry only demotes
+// demonstrably broken routes (quarantine) to the tail; it never reorders which
+// provider leads. When every candidate is unhealthy the pool still degrades
+// gracefully instead of hard-503ing.
+const AUTO_PROVIDER_PRIORITY = ["kilo-gateway"];
 
-function providerPriorityIndex(provider: AiProvider, wantsTools = false): number {
-  if (wantsTools && provider.id === TOOL_PRIORITY_LEAD) return -1;
+function providerPriorityIndex(provider: AiProvider): number {
   const index = AUTO_PROVIDER_PRIORITY.indexOf(provider.id);
   return index === -1 ? AUTO_PROVIDER_PRIORITY.length : index;
 }
@@ -1070,7 +846,7 @@ async function autoModelCandidates(providers: AiProvider[], providerScope?: stri
   const scopedProviders = providers
     .filter(inScope)
     .filter((provider) => !wantsTools || providerSupportsToolProtocol(provider))
-    .sort((a, b) => providerPriorityIndex(a, wantsTools) - providerPriorityIndex(b, wantsTools) || a.priority - b.priority);
+    .sort((a, b) => providerPriorityIndex(a) - providerPriorityIndex(b) || a.priority - b.priority);
   const health = await getPoolHealth().catch(() => new Map<string, UsageHealthRow>());
   const entries = scopedProviders.flatMap((provider) =>
     rankedProviderModels(provider).map((model) => {
@@ -1097,7 +873,7 @@ async function autoModelCandidates(providers: AiProvider[], providerScope?: stri
   const demoted = wantsTools ? await demotedToolProviders(scopedProviders, (provider: AiProvider) => rankedProviderModels(provider)) : new Map<string, boolean>();
   const pool = entries.sort((a, b) =>
     (demoted.get(a.provider.id) ? 1 : 0) - (demoted.get(b.provider.id) ? 1 : 0)
-    || providerPriorityIndex(a.provider, wantsTools) - providerPriorityIndex(b.provider, wantsTools)
+    || providerPriorityIndex(a.provider) - providerPriorityIndex(b.provider)
     || b.score - a.score || a.model.localeCompare(b.model),
   );
   const eager: string[] = [];
@@ -1106,9 +882,8 @@ async function autoModelCandidates(providers: AiProvider[], providerScope?: stri
     (entry.quarantined ? tail : eager).push(entry.model);
   }
   const candidates = [...eager, ...tail];
-  // Lead the batch with one best model per provider so it gracefully walks
-  // airforce -> opencode -> kilo -> ... in a single pass rather than burning the
-  // whole (truncated) batch inside the first provider.
+  // Lead the batch with one best model per provider so a batch pass never burns
+  // the whole (truncated) candidate list inside the first route it tries.
   const leaders: string[] = [];
   const rest: string[] = [];
   const seenLeadingProvider = new Set<string>();
@@ -1207,15 +982,7 @@ export async function handleAiOnlyChatCompletions(request: Request, dependencies
         cooldownBypassRoutes.add(modelRouteKey(provider, model));
         if (!wantsTools) cooldownBypassUsed = true;
       }
-      const reservation = await reserveProviderUpstreamRequest(provider, dependencies);
-      if (reservation && !reservation.allowed) {
-        lastResponse = providerRateLimitResponse(reservation);
-        lastRetryableStatus = 429;
-        attemptTrail.push(`${model}:429`);
-        noteProviderFailure(provider, model, 429);
-        if (isProviderAuto) return lastResponse;
-        continue;
-      }
+
       attemptedAny = true;
       const upstreamModel = providerModel(model, provider);
       const route = { providerId: provider.id, model };
