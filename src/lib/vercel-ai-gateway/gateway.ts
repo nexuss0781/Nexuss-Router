@@ -32,6 +32,34 @@ import {
   type UsageHealthRow,
 } from "@/lib/supabaseGateway";
 import { applySupabaseMigration, SCHEMA_VERSION } from "@/lib/supabaseMigration";
+import {
+  canonicalizeToolCallStream,
+  decodeToolAffinity,
+  encodeToolAffinity,
+  normalizeChatToolRequest,
+  normalizeChatToolResponse,
+  OMNIROUTE_TOOL_AFFINITY_HEADER,
+  OMNIROUTE_TOOL_PROTOCOL,
+  type NormalizedToolRequest,
+  type ToolAffinity,
+} from "./toolProtocol";
+import {
+  classifyUpstreamStatus,
+  isEventStream,
+  preflightStream,
+  providerErrorEnvelope,
+  type UpstreamFailure,
+} from "./upstreamResponse";
+import {
+  isProviderCoolingDown,
+  modelRouteKey,
+  noteProviderFailure,
+  noteProviderSuccess,
+  noteToolResult,
+  providerRouteKey,
+  toolDemotedProviders as demotedToolProviders,
+  toolTally,
+} from "./routeHealth";
 
 const MAX_CHAT_BODY_BYTES = 4 * 1024 * 1024;
 const MAX_PROVIDER_TIMEOUT_MS = 240_000;
@@ -56,29 +84,6 @@ function jsonResponse(body: unknown, status = 200, headers: Record<string, strin
 
 function errorResponse(status: number, message: string, code = "invalid_request_error", headers: Record<string, string> = {}) {
   return jsonResponse({ error: { message, type: status >= 500 ? "server_error" : "invalid_request_error", code } }, status, headers);
-}
-
-type UpstreamFailure = { retryable: boolean; code: string; message: string };
-
-// Classifies an upstream HTTP status. Returns null for a successful (2xx)
-// response. Non-retryable failures are caller-side validation errors that
-// retrying another source will not fix. Everything else is retryable so the
-// gateway can move to a different source instead of surfacing a raw upstream
-// 5xx/502 to the client.
-function classifyUpstreamStatus(status: number): UpstreamFailure | null {
-  if (status >= 200 && status < 300) return null;
-  if (status === 400) return { retryable: false, code: "bad_request", message: "The upstream provider rejected the request payload" };
-  if (status === 404) return { retryable: false, code: "not_found", message: "The upstream provider could not find the requested resource or model" };
-  if (status === 405) return { retryable: false, code: "method_not_allowed", message: "The upstream provider rejected the HTTP method" };
-  if (status === 413) return { retryable: false, code: "payload_too_large", message: "The upstream provider rejected the payload size" };
-  if (status === 415) return { retryable: false, code: "unsupported_media_type", message: "The upstream provider rejected the media type" };
-  if (status === 422) return { retryable: false, code: "unprocessable_entity", message: "The upstream provider rejected the request content" };
-  if (status === 401 || status === 403) return { retryable: true, code: "provider_authentication_failed", message: "The upstream provider rejected the gateway credentials" };
-  if (status === 402) return { retryable: true, code: "provider_quota_exceeded", message: "The upstream provider reported insufficient account credit" };
-  if (status === 408 || status === 504) return { retryable: true, code: "provider_timeout", message: "The upstream provider did not respond in time" };
-  if (status === 429) return { retryable: true, code: "provider_rate_limited", message: "The upstream provider rate-limited the request" };
-  if (status >= 500) return { retryable: true, code: "provider_server_error", message: "The upstream provider returned a server error" };
-  return { retryable: true, code: "provider_unavailable", message: "The upstream provider could not serve the request" };
 }
 
 function providersForModel(providers: AiProvider[], model: string, providerId?: string): AiProvider[] {
@@ -450,6 +455,32 @@ function hasUsableAssistantText(payload: any, acceptToolCalls = false): boolean 
   // that is a successful outcome, not an empty/malformed completion.
   if (acceptToolCalls && Array.isArray(message?.tool_calls) && message.tool_calls.length > 0) return true;
   return false;
+}
+
+function providerSupportsToolProtocol(provider: AiProvider): boolean {
+  const format = provider.format.toLowerCase();
+  return !/(anthropic|claude|gemini|google|responses|messages)/.test(format);
+}
+
+function toolCompatibleFailure(failure: UpstreamFailure, wantsTools: boolean, isAuto: boolean): UpstreamFailure {
+  if (wantsTools && isAuto && !failure.retryable) {
+    return {
+      retryable: true,
+      code: "provider_tool_incompatible",
+      message: "The provider could not use the canonical tool payload; trying another route",
+    };
+  }
+  return failure;
+}
+
+function requestToolAffinity(request: Request, body: any, normalized: NormalizedToolRequest): ToolAffinity | null {
+  const headerAffinity = decodeToolAffinity(request.headers.get(OMNIROUTE_TOOL_AFFINITY_HEADER));
+  if (headerAffinity) return headerAffinity;
+  const providerId = request.headers.get("x-omniroute-provider")?.trim();
+  const model = request.headers.get("x-omniroute-model")?.trim();
+  if (providerId && model) return { providerId, model: model.startsWith(`${providerId}/`) ? model : `${providerId}/${model}` };
+  const bodyAffinity = decodeToolAffinity(body?.omniroute_tool_affinity ?? body?.tool_affinity);
+  return bodyAffinity || normalized.affinity;
 }
 
 function streamWithUsage(body: ReadableStream<Uint8Array> | null, onComplete: () => void): ReadableStream<Uint8Array> | null {
@@ -943,96 +974,6 @@ const MAX_AUTO_SECONDARY_CANDIDATES = 21;
 const AGENT_FAST_DEADLINE_MS = 3_000;
 const AGENT_BALANCED_DEADLINE_MS = 8_000;
 const QUALITY_DEADLINE_MS = 20_000;
-const MAX_COOLDOWN_MS = 5 * 60_000;
-const ROUTE_COOLDOWN_MS = 30_000;
-const PROVIDER_COOLDOWN_MS = 10_000;
-const routeCooldowns = new Map<string, number>();
-
-function canonicalProviderModel(provider: AiProvider, model: string): string {
-  return model.startsWith(`${provider.id}/`) ? model : `${provider.id}/${model}`;
-}
-
-function providerRouteKey(provider: AiProvider): string {
-  return `${provider.id}|${provider.baseUrl}|${provider.apiKey ? "keyed" : "keyless"}`;
-}
-
-function modelRouteKey(provider: AiProvider, model: string): string {
-  return `${providerRouteKey(provider)}|${model}`;
-}
-
-// Consecutive-failure streak per route drives an exponential circuit breaker:
-// every repeated failure doubles the cooldown (bounded), so saturated endpoints
-// drop out of the rotation faster within a warm instance. A success resets it.
-const failureStreaks = new Map<string, number>();
-
-// Session-scoped tool aptitude. Agents send tool schemas that many free models
-// reject; the pool learns which routes actually accept tools and prefers them.
-const sessionToolFailures = new Map<string, number>();
-const sessionToolSuccesses = new Map<string, number>();
-
-const POOL_HEALTH_TTL_MS = 30_000;
-let poolHealthCache: Map<string, UsageHealthRow> | null = null;
-let poolHealthCacheAt = 0;
-
-async function getPoolHealth(): Promise<Map<string, UsageHealthRow>> {
-  const now = Date.now();
-  if (poolHealthCache && now - poolHealthCacheAt < POOL_HEALTH_TTL_MS) return poolHealthCache;
-  // Supabase is the telemetry store; Parad-only deployments just skip health
-  // ranking and still get the full quality-ranked pool (best effort).
-  const rows = hasSupabaseGateway() ? await getHotUsageHealth() : [];
-  const map = new Map<string, UsageHealthRow>();
-  // q.model already carries the provider-qualified id (e.g.
-  // "kilo-gateway/nvidia/..."), which matches how the candidate pool identifies
-  // models, so store the row under that exact key.
-  for (const row of rows) map.set(row.model, row);
-  poolHealthCache = map;
-  poolHealthCacheAt = now;
-  return map;
-}
-
-function isQuarantinedHealth(row: UsageHealthRow): boolean {
-  if (row.attempts < 3) return false;
-  const streak = (row.recent_statuses || []).slice(0, 3);
-  if (streak.length >= 3 && streak.every((status) => status !== "succeeded")) return true;
-  if (row.attempts >= 5 && row.failures / row.attempts >= 0.5) return true;
-  return false;
-}
-
-function isProviderCoolingDown(provider: AiProvider, model: string): boolean {
-  const now = Date.now();
-  const providerUntil = routeCooldowns.get(providerRouteKey(provider)) || 0;
-  const modelUntil = routeCooldowns.get(modelRouteKey(provider, model)) || 0;
-  return providerUntil > now || modelUntil > now;
-}
-
-function noteProviderSuccess(provider: AiProvider, model: string): void {
-  failureStreaks.delete(providerRouteKey(provider));
-  failureStreaks.delete(modelRouteKey(provider, model));
-}
-
-function noteProviderFailure(provider: AiProvider, model: string, status: number): void {
-  const now = Date.now();
-  if (status === 429) {
-    const key = modelRouteKey(provider, model);
-    const streak = (failureStreaks.get(key) || 0) + 1;
-    failureStreaks.set(key, streak);
-    routeCooldowns.set(key, now + Math.min(ROUTE_COOLDOWN_MS * 2 ** (streak - 1), MAX_COOLDOWN_MS));
-    return;
-  }
-  if (status === 401 || status === 402 || status === 403 || status === 408 || status >= 500) {
-    const key = providerRouteKey(provider);
-    const streak = (failureStreaks.get(key) || 0) + 1;
-    failureStreaks.set(key, streak);
-    routeCooldowns.set(key, now + Math.min(PROVIDER_COOLDOWN_MS * 2 ** (streak - 1), MAX_COOLDOWN_MS));
-  }
-}
-
-function noteToolResult(provider: AiProvider, model: string, succeeded: boolean): void {
-  const key = modelRouteKey(provider, model);
-  if (succeeded) sessionToolSuccesses.set(key, (sessionToolSuccesses.get(key) || 0) + 1);
-  else sessionToolFailures.set(key, (sessionToolFailures.get(key) || 0) + 1);
-}
-
 function autoModelScore(provider: AiProvider, model: string): number {
   const metadata = getAiModelMetadata(model, provider.id);
   if (!["text-chat", "text-chat-vision-candidate"].includes(metadata.modality)) return Number.NEGATIVE_INFINITY;
@@ -1088,9 +1029,48 @@ function providerPriorityIndex(provider: AiProvider, wantsTools = false): number
   return index === -1 ? AUTO_PROVIDER_PRIORITY.length : index;
 }
 
-async function autoModelCandidates(providers: AiProvider[], providerScope?: string, wantsTools = false): Promise<string[]> {
+function attemptTrailHeader(attemptTrail: string[]): string {
+  return attemptTrail.length ? attemptTrail.slice(0, 12).join(",").slice(0, 512) : "none";
+}
+
+const POOL_HEALTH_TTL_MS = 30_000;
+let poolHealthCache: Map<string, UsageHealthRow> | null = null;
+let poolHealthCacheAt = 0;
+
+function canonicalProviderModel(provider: AiProvider, model: string): string {
+  return model.startsWith(`${provider.id}/`) ? model : `${provider.id}/${model}`;
+}
+
+async function getPoolHealth(): Promise<Map<string, UsageHealthRow>> {
+  const now = Date.now();
+  if (poolHealthCache && now - poolHealthCacheAt < POOL_HEALTH_TTL_MS) return poolHealthCache;
+  // Supabase is the telemetry store; Parad-only deployments just skip health
+  // ranking and still get the full quality-ranked pool (best effort).
+  const rows = hasSupabaseGateway() ? await getHotUsageHealth() : [];
+  const map = new Map<string, UsageHealthRow>();
+  // q.model already carries the provider-qualified id (e.g.
+  // "kilo-gateway/nvidia/..."), which matches how the candidate pool identifies
+  // models, so store the row under that exact key.
+  for (const row of rows) map.set(row.model, row);
+  poolHealthCache = map;
+  poolHealthCacheAt = now;
+  return map;
+}
+
+function isQuarantinedHealth(row: UsageHealthRow): boolean {
+  if (row.attempts < 3) return false;
+  const streak = (row.recent_statuses || []).slice(0, 3);
+  if (streak.length >= 3 && streak.every((status) => status !== "succeeded")) return true;
+  if (row.attempts >= 5 && row.failures / row.attempts >= 0.5) return true;
+  return false;
+}
+
+async function autoModelCandidates(providers: AiProvider[], providerScope?: string, wantsTools = false, preferredAffinity?: ToolAffinity | null): Promise<string[]> {
   const inScope = (provider: AiProvider) => !providerScope || provider.id === providerScope;
-  const scopedProviders = providers.filter(inScope).sort((a, b) => providerPriorityIndex(a, wantsTools) - providerPriorityIndex(b, wantsTools) || a.priority - b.priority);
+  const scopedProviders = providers
+    .filter(inScope)
+    .filter((provider) => !wantsTools || providerSupportsToolProtocol(provider))
+    .sort((a, b) => providerPriorityIndex(a, wantsTools) - providerPriorityIndex(b, wantsTools) || a.priority - b.priority);
   const health = await getPoolHealth().catch(() => new Map<string, UsageHealthRow>());
   const entries = scopedProviders.flatMap((provider) =>
     rankedProviderModels(provider).map((model) => {
@@ -1103,15 +1083,22 @@ async function autoModelCandidates(providers: AiProvider[], providerScope?: stri
       if (reliability !== null) score += (reliability - 0.5) * 600;
       if (latency !== null && Number.isFinite(latency)) score -= latency / 40;
       if (wantsTools) {
-        score += (sessionToolSuccesses.get(key) || 0) * 60;
-        score -= (sessionToolFailures.get(key) || 0) * 120;
+        const tally = toolTally(provider, model);
+        score += tally.successes * 60;
+        score -= tally.failures * 120;
       }
       return { provider, model, score, quarantined };
     }),
   );
   // Walk providers in fixed priority; within a provider sort by model quality.
+  // Tool workflows first set aside providers that have already failed tool calls
+  // in this instance, so a dead route cannot keep leading the pool by priority
+  // alone and starve a provider that can actually serve tools.
+  const demoted = wantsTools ? await demotedToolProviders(scopedProviders, (provider: AiProvider) => rankedProviderModels(provider)) : new Map<string, boolean>();
   const pool = entries.sort((a, b) =>
-    providerPriorityIndex(a.provider) - providerPriorityIndex(b.provider) || b.score - a.score || a.model.localeCompare(b.model),
+    (demoted.get(a.provider.id) ? 1 : 0) - (demoted.get(b.provider.id) ? 1 : 0)
+    || providerPriorityIndex(a.provider, wantsTools) - providerPriorityIndex(b.provider, wantsTools)
+    || b.score - a.score || a.model.localeCompare(b.model),
   );
   const eager: string[] = [];
   const tail: string[] = [];
@@ -1136,11 +1123,17 @@ async function autoModelCandidates(providers: AiProvider[], providerScope?: stri
   }
   const ordered = [...leaders, ...rest];
   const configured = parseModels(process.env.OMNIROUTE_AI_AUTO_MODELS || "");
-  if (configured.length) return configured.filter((model) => ordered.includes(model));
-  return ordered;
+  const selected = configured.length ? configured.filter((model) => ordered.includes(model)) : ordered;
+  if (!preferredAffinity || (providerScope && providerScope !== preferredAffinity.providerId)) return selected;
+  const preferredModel = preferredAffinity.model.startsWith(`${preferredAffinity.providerId}/`)
+    ? preferredAffinity.model
+    : `${preferredAffinity.providerId}/${preferredAffinity.model}`;
+  return selected.includes(preferredModel)
+    ? [preferredModel, ...selected.filter((model) => model !== preferredModel)]
+    : selected;
 }
 
-export async function handleAiOnlyChatCompletions(request: Request, dependencies: ParadRequestDependencies = {}) {
+export async function handleAiOnlyChatCompletions(request: Request, dependencies: ParadRequestDependencies = {}, options: { providerId?: string } = {}) {
   const { policy, response: authFailure } = await authenticateGatewayRequest(request, dependencies);
   if (authFailure) return authFailure;
   if (request.method !== "POST") return errorResponse(405, "Method not allowed", "method_not_allowed");
@@ -1157,7 +1150,10 @@ export async function handleAiOnlyChatCompletions(request: Request, dependencies
   if (!body || typeof body !== "object" || !Array.isArray(body.messages) || body.messages.length === 0) return errorResponse(400, "messages must be a non-empty array");
   if (body.model !== undefined && typeof body.model !== "string") return errorResponse(400, "model must be a string");
 
-  const requestedModel = body.model?.trim() || "auto";
+  const toolRequest = normalizeChatToolRequest(body);
+  if (toolRequest.invalidToolDefinition) return errorResponse(400, "tools must contain valid function definitions and tool_choice must be valid");
+  const requestBody = toolRequest.body;
+  const requestedModel = bodyModel(requestBody);
   const routingClass = (body.routing_class === "agent-fast" || body.routing_class === "agent-balanced" || body.routing_class === "quality"
     ? body.routing_class
     : requestedModel === "quality" ? "quality"
@@ -1165,17 +1161,28 @@ export async function handleAiOnlyChatCompletions(request: Request, dependencies
     : requestedModel === "agent-balanced" ? "agent-balanced"
     : "auto");
   const isProviderAuto = requestedModel.startsWith("auto/") && requestedModel !== "auto/free";
+  const requestedProviderScope = isProviderAuto ? requestedModel.slice("auto/".length) : undefined;
+  if (options.providerId && requestedProviderScope && requestedProviderScope !== options.providerId) return errorResponse(400, `Model "${requestedModel}" does not belong to provider "${options.providerId}"`, "model_provider_mismatch");
+  if (options.providerId && requestedModel !== "auto" && !isProviderAuto && requestedModel.includes("/")) {
+    const prefix = requestedModel.split("/", 1)[0];
+    if (prefix !== options.providerId) return errorResponse(400, `Model "${requestedModel}" does not belong to provider "${options.providerId}"`, "model_provider_mismatch");
+  }
   const isAuto = requestedModel === "auto" || requestedModel === "auto/free" || isProviderAuto || routingClass !== "auto";
-  const providerScope = isProviderAuto ? requestedModel.slice("auto/".length) : undefined;
+  const providerScope = options.providerId || requestedProviderScope;
   const policyFailure = policyAllows(policy, "chat.completions", requestedModel);
   if (policyFailure) return policyFailure;
   const providers = await listProviders(dependencies);
-  const wantsTools = Boolean(body.tool_choice) || (Array.isArray(body.tools) && body.tools.length > 0);
-  // Automatic routing escalates the deadline instead of returning an early
-  // timeout: fast -> balanced -> quality. Keep enough candidates available for
-  // the later phases to make progress when the first provider is slow.
-  const models = isAuto ? (await autoModelCandidates(providers, providerScope, wantsTools)).slice(0, MAX_AUTO_SECONDARY_CANDIDATES + 1) : [requestedModel];
-  if (!models.length) return errorResponse(503, "No currently available model can serve this request", "provider_unavailable");
+  const wantsTools = toolRequest.hasToolIntent;
+  const toolWorkflow = wantsTools || toolRequest.hasToolResult;
+  const preferredAffinity = isAuto ? requestToolAffinity(request, body, toolRequest) : null;
+  const models = isAuto
+    ? (await autoModelCandidates(providers, providerScope, wantsTools, preferredAffinity)).slice(0, MAX_AUTO_SECONDARY_CANDIDATES + 1)
+    : [requestedModel];
+  if (!models.length) {
+    return wantsTools
+      ? errorResponse(503, "No currently available provider supports the canonical tool protocol", "tool_protocol_unavailable")
+      : errorResponse(503, "No currently available model can serve this request", "provider_unavailable");
+  }
 
   let lastResponse: Response | null = null;
   let lastRetryableStatus: number | null = null;
@@ -1184,33 +1191,50 @@ export async function handleAiOnlyChatCompletions(request: Request, dependencies
   let attempt = 0;
   let attemptedAny = false;
   let cooldownBypassUsed = false;
+  const cooldownBypassRoutes = new Set<string>();
+  const attemptTrail: string[] = [];
   for (const model of models) {
-    const providerCandidates = selectProviders(providers, model);
+    const providerCandidates = selectProviders(providers, model).filter((provider) => !options.providerId || provider.id === options.providerId);
     for (const provider of providerCandidates) {
       const coolingDown = isProviderCoolingDown(provider, model);
       // When every candidate is in cooldown, still give the top of the pool one
       // best-effort attempt so a saturated free pool degrades onto a real probe
-      // instead of failing out with no attempt at all.
-      if (coolingDown && (attemptedAny || cooldownBypassUsed)) continue;
-      if (coolingDown) cooldownBypassUsed = true;
+      // instead of failing out with no attempt at all. Tool workflows get one
+      // probe per route, otherwise a single leading route would consume the only
+      // bypass and starve a healthy model of the same provider further down.
+      if (coolingDown && (cooldownBypassRoutes.has(modelRouteKey(provider, model)) || (!wantsTools && (attemptedAny || cooldownBypassUsed)))) continue;
+      if (coolingDown) {
+        cooldownBypassRoutes.add(modelRouteKey(provider, model));
+        if (!wantsTools) cooldownBypassUsed = true;
+      }
       const reservation = await reserveProviderUpstreamRequest(provider, dependencies);
       if (reservation && !reservation.allowed) {
         lastResponse = providerRateLimitResponse(reservation);
         lastRetryableStatus = 429;
+        attemptTrail.push(`${model}:429`);
         noteProviderFailure(provider, model, 429);
         if (isProviderAuto) return lastResponse;
         continue;
       }
       attemptedAny = true;
       const upstreamModel = providerModel(model, provider);
+      const route = { providerId: provider.id, model };
       const endpoint = `${provider.baseUrl}/chat/completions`;
       const controller = new AbortController();
-      const phase = !isAuto || routingClass === "quality"
+      const phase = toolRequest.hasToolResult
         ? "quality"
-        : routingClass === "agent-balanced"
-          ? (attempt === 0 ? "balanced" : "quality")
-          : (attempt === 0 ? "fast" : attempt === 1 ? "balanced" : "quality");
-      const deadline = phase === "fast" ? AGENT_FAST_DEADLINE_MS : phase === "balanced" ? AGENT_BALANCED_DEADLINE_MS : (isAuto ? QUALITY_DEADLINE_MS : MAX_PROVIDER_TIMEOUT_MS);
+        : wantsTools
+          ? routingClass === "quality" ? "quality" : "balanced"
+          : !isAuto || routingClass === "quality"
+            ? "quality"
+            : routingClass === "agent-balanced"
+              ? (attempt === 0 ? "balanced" : "quality")
+              : (attempt === 0 ? "fast" : attempt === 1 ? "balanced" : "quality");
+      const deadline = toolRequest.hasToolResult
+        ? (isAuto ? QUALITY_DEADLINE_MS : MAX_PROVIDER_TIMEOUT_MS)
+        : wantsTools
+          ? (routingClass === "quality" ? (isAuto ? QUALITY_DEADLINE_MS : MAX_PROVIDER_TIMEOUT_MS) : AGENT_BALANCED_DEADLINE_MS)
+          : phase === "fast" ? AGENT_FAST_DEADLINE_MS : phase === "balanced" ? AGENT_BALANCED_DEADLINE_MS : (isAuto ? QUALITY_DEADLINE_MS : MAX_PROVIDER_TIMEOUT_MS);
       attempt += 1;
       const timeout = setTimeout(() => controller.abort(), deadline);
       const startedAt = Date.now();
@@ -1218,42 +1242,87 @@ export async function handleAiOnlyChatCompletions(request: Request, dependencies
         const upstream = await fetch(endpoint, {
           method: "POST",
           headers: upstreamHeaders(provider),
-          body: JSON.stringify({ ...body, model: upstreamModel }),
+          body: JSON.stringify({ ...requestBody, model: upstreamModel }),
           signal: controller.signal,
         });
-        if (body.stream === true) {
-          if (!upstream.ok) {
-            const failure = classifyUpstreamStatus(upstream.status) || { retryable: true, code: "provider_unavailable", message: "The upstream provider could not serve the request" };
+        if (requestBody.stream === true) {
+          if (!upstream.ok || !isEventStream(upstream.headers.get("content-type"))) {
+            await upstream.body?.cancel().catch(() => undefined);
+            const status = upstream.ok ? 502 : upstream.status;
+            const failure = toolCompatibleFailure(classifyUpstreamStatus(status) || { retryable: true, code: "provider_unavailable", message: "The upstream provider could not serve the request" }, wantsTools, isAuto);
             await recordUsage(provider, model, "chat.completions", "failed", {}, policy, startedAt, dependencies);
-            lastRetryableStatus = upstream.status;
-            noteProviderFailure(provider, model, upstream.status);
+            lastRetryableStatus = status;
+            attemptTrail.push(`${model}:${status}`);
+            noteProviderFailure(provider, model, status);
             if (wantsTools) noteToolResult(provider, model, false);
             if (failure.retryable) continue;
-            return errorResponse(503, failure.message, failure.code, { "x-omniroute-provider": provider.id, "x-omniroute-model": model });
+            return errorResponse(503, failure.message, failure.code, { "x-omniroute-provider": provider.id, "x-omniroute-model": model, "x-omniroute-attempt-trail": attemptTrailHeader(attemptTrail) });
+          }
+          const preflight = preflightStream(upstream.body);
+          const streamFailure = await preflight.inspect();
+          if (streamFailure) {
+            await preflight.cancel().catch(() => undefined);
+            const failure = toolCompatibleFailure(streamFailure, wantsTools, isAuto);
+            await recordUsage(provider, model, "chat.completions", "failed", {}, policy, startedAt, dependencies);
+            lastRetryableStatus = 503;
+            lastFailureMessage = failure.message;
+            lastFailureCode = failure.code;
+            attemptTrail.push(`${model}:${failure.code}`);
+            noteProviderFailure(provider, model, 503);
+            if (wantsTools) noteToolResult(provider, model, false);
+            if (failure.retryable) continue;
+            return errorResponse(503, failure.message, failure.code, { "x-omniroute-provider": provider.id, "x-omniroute-model": model, "x-omniroute-attempt-trail": attemptTrailHeader(attemptTrail) });
           }
           noteProviderSuccess(provider, model);
           if (wantsTools) noteToolResult(provider, model, true);
-          const stream = streamWithUsage(upstream.body, () => void recordUsage(provider, model, "chat.completions", "succeeded", {}, policy, startedAt, dependencies));
-          return new Response(stream, { status: upstream.status, headers: { "content-type": upstream.headers.get("content-type") || "text/event-stream", "cache-control": "no-cache", "x-omniroute-provider": provider.id, "x-omniroute-model": model, "x-omniroute-routing-class": phase } });
+          const sourceStream = toolWorkflow ? canonicalizeToolCallStream(preflight.stream, route) : preflight.stream;
+          const stream = streamWithUsage(sourceStream, () => void recordUsage(provider, model, "chat.completions", "succeeded", {}, policy, startedAt, dependencies));
+          const streamHeaders: Record<string, string> = { "content-type": upstream.headers.get("content-type") || "text/event-stream", "cache-control": "no-cache", "x-omniroute-provider": provider.id, "x-omniroute-model": model, "x-omniroute-routing-class": phase };
+          if (toolWorkflow) {
+            streamHeaders["x-omniroute-tool-protocol"] = OMNIROUTE_TOOL_PROTOCOL;
+            streamHeaders[OMNIROUTE_TOOL_AFFINITY_HEADER] = encodeToolAffinity(route);
+          }
+          return new Response(stream, { status: upstream.status, headers: streamHeaders });
         }
         if (!upstream.ok) {
-          const failure = classifyUpstreamStatus(upstream.status) || { retryable: true, code: "provider_unavailable", message: "The upstream provider could not serve the request" };
+          const failure = toolCompatibleFailure(classifyUpstreamStatus(upstream.status) || { retryable: true, code: "provider_unavailable", message: "The upstream provider could not serve the request" }, wantsTools, isAuto);
           await recordUsage(provider, model, "chat.completions", "failed", {}, policy, startedAt, dependencies);
           lastRetryableStatus = upstream.status;
+          attemptTrail.push(`${model}:${upstream.status}`);
           noteProviderFailure(provider, model, upstream.status);
           if (wantsTools) noteToolResult(provider, model, false);
           lastFailureMessage = failure.message;
           lastFailureCode = failure.code;
           if (failure.retryable) continue;
-          return errorResponse(503, failure.message, failure.code, { "x-omniroute-provider": provider.id, "x-omniroute-model": model });
+          return errorResponse(503, failure.message, failure.code, { "x-omniroute-provider": provider.id, "x-omniroute-model": model, "x-omniroute-attempt-trail": attemptTrailHeader(attemptTrail) });
         }
         const responseBody = await upstream.json().catch(() => ({ error: { message: "Provider returned invalid JSON" } }));
-        await recordUsage(provider, model, "chat.completions", "succeeded", responseBody, policy, startedAt, dependencies);
-        const response = jsonResponse(responseBody, upstream.status, { "x-omniroute-provider": provider.id, "x-omniroute-model": model, "x-omniroute-routing-class": phase });
-        if (isAuto && !hasUsableAssistantText(responseBody, wantsTools)) {
+        const envelope = providerErrorEnvelope(responseBody);
+        if (envelope) {
+          const failure = toolCompatibleFailure(envelope.failure, wantsTools, isAuto);
+          await recordUsage(provider, model, "chat.completions", "failed", {}, policy, startedAt, dependencies);
+          lastRetryableStatus = envelope.status;
+          lastFailureMessage = failure.message;
+          lastFailureCode = failure.code;
+          attemptTrail.push(`${model}:${envelope.status}`);
+          noteProviderFailure(provider, model, envelope.status);
+          if (wantsTools) noteToolResult(provider, model, false);
+          if (failure.retryable) continue;
+          return errorResponse(503, failure.message, failure.code, { "x-omniroute-provider": provider.id, "x-omniroute-model": model, "x-omniroute-attempt-trail": attemptTrailHeader(attemptTrail) });
+        }
+        const normalizedResponseBody = normalizeChatToolResponse(responseBody, toolWorkflow ? route : null);
+        await recordUsage(provider, model, "chat.completions", "succeeded", normalizedResponseBody, policy, startedAt, dependencies);
+        const responseHeaders: Record<string, string> = { "x-omniroute-provider": provider.id, "x-omniroute-model": model, "x-omniroute-routing-class": phase };
+        if (toolWorkflow) {
+          responseHeaders["x-omniroute-tool-protocol"] = OMNIROUTE_TOOL_PROTOCOL;
+          responseHeaders[OMNIROUTE_TOOL_AFFINITY_HEADER] = encodeToolAffinity(route);
+        }
+        const response = jsonResponse(normalizedResponseBody, upstream.status, responseHeaders);
+        if (isAuto && !hasUsableAssistantText(normalizedResponseBody, wantsTools)) {
           lastRetryableStatus = 502;
           lastFailureMessage = "The upstream provider returned a completion with no readable text";
           lastFailureCode = "provider_empty_completion";
+          attemptTrail.push(`${model}:502`);
           noteProviderFailure(provider, model, 502);
           if (wantsTools) noteToolResult(provider, model, false);
           continue;
@@ -1267,6 +1336,7 @@ export async function handleAiOnlyChatCompletions(request: Request, dependencies
         lastRetryableStatus = 408;
         lastFailureMessage = message;
         lastFailureCode = "provider_timeout";
+        attemptTrail.push(`${model}:408`);
         noteProviderFailure(provider, model, 408);
         if (wantsTools) noteToolResult(provider, model, false);
       } finally {
@@ -1274,5 +1344,5 @@ export async function handleAiOnlyChatCompletions(request: Request, dependencies
       }
     }
   }
-  return errorResponse(503, lastFailureMessage, lastFailureCode, { "retry-after": "5", "x-omniroute-failure-codes": lastRetryableStatus !== null ? String(lastRetryableStatus) : "unavailable" });
+  return errorResponse(503, lastFailureMessage, lastFailureCode, { "retry-after": "5", "x-omniroute-failure-codes": lastRetryableStatus !== null ? String(lastRetryableStatus) : "unavailable", "x-omniroute-attempt-trail": attemptTrailHeader(attemptTrail) });
 }

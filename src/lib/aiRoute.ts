@@ -16,13 +16,20 @@ import {
   handleAiJobRetry as baseHandleAiJobRetry,
   handleAiJobComplete as baseHandleAiJobComplete,
 } from "@/lib/vercel-ai-gateway/gateway";
-import { checkRenderHealth, maybeForwardToRender } from "@/lib/renderFailover";
+import { checkRenderHealth, lastRenderSkipReason, maybeForwardToRender } from "@/lib/renderFailover";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
 
 async function route(request: Request, fallback: () => Promise<Response> | Response): Promise<Response> {
-  return (await maybeForwardToRender(request)) ?? await fallback();
+  const forwardedResponse = await maybeForwardToRender(request);
+  if (forwardedResponse) return forwardedResponse;
+  const response = await fallback();
+  const skipReason = lastRenderSkipReason();
+  if (!skipReason || !response.body) return response;
+  const headers = new Headers(response.headers);
+  headers.set("x-omniroute-render-skip", skipReason);
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
 
 export function jsonRoute(endpointName: string, options: Record<string, unknown> = {}) {
@@ -39,7 +46,7 @@ export async function getAiGatewayHealth() {
   const baseBody = await baseResponse.json().catch(() => ({}));
   return Response.json({ ...(baseBody as Record<string, unknown>), render });
 }
-export function handleAiOnlyChatCompletions(request: Request) { return route(request, () => baseHandleAiOnlyChatCompletions(request)); }
+export function handleAiOnlyChatCompletions(request: Request, options: { providerId?: string } = {}) { return route(request, () => baseHandleAiOnlyChatCompletions(request, {}, options)); }
 export function handleAiOnlyFileUpload(request: Request) { return route(request, () => baseHandleAiOnlyFileUpload(request)); }
 export function handleAiOnlyFileList(request: Request) { return route(request, () => baseHandleAiOnlyFileList(request)); }
 export function handleAiOnlyFileMetadata(request: Request, id: string) { return route(request, () => baseHandleAiOnlyFileMetadata(request, id)); }

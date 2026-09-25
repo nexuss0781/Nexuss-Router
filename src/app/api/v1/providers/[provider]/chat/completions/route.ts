@@ -1,4 +1,8 @@
-import { jsonRoute } from "@/lib/aiRoute";
+import { handleAiOnlyChatCompletions } from "@/lib/aiRoute";
 export const runtime = "nodejs";
 export const maxDuration = 300;
-export const POST = jsonRoute("chat/completions");
+type ProviderRouteContext = { params: Promise<{ provider: string }> | { provider: string } };
+export async function POST(request: Request, context: ProviderRouteContext) {
+  const { provider } = await context.params;
+  return handleAiOnlyChatCompletions(request, { providerId: provider });
+}
