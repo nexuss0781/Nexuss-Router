@@ -241,7 +241,13 @@ Requires Node.js 22.22.2 or newer.
 
 ## Documentation
 
+- [Provider & Model Admission Criteria](CRITERIA.md) — the standard every provider and model is measured against
+- [Free Model Provider Collaboration Program](COLLABORATION.md) — join the network and submit a provider
 - [Low-Latency Architecture](docs/LOW_LATENCY_ARCHITECTURE.md) — request lifecycle and latency design
 - [Low-Latency Implementation](docs/LOW_LATENCY_IMPLEMENTATION.md) — the implementation record
 - [Render Runtime](render/README.md) — long-lived runtime and failover
 - [Agent Skill](SKILL/SKILL.md) — instructions for agents driving the gateway
+
+## Contributing
+
+NAR accepts free-tier model providers into its routing network. Start with the [collaboration program](COLLABORATION.md); the [admission criteria](CRITERIA.md) define what a provider and each of its models must satisfy, how they are verified, and how they are reviewed over time.

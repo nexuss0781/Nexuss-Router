@@ -1,0 +1,159 @@
+name: Provider submission
+description: Submit a free-tier model provider to the Nexuss AI Router collaboration program.
+title: "Provider submission: "
+labels: ["provider-submission"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for submitting a provider to **Nexuss AI Router (NAR)**.
+
+        Every submission is evaluated against
+        [Provider & Model Admission Criteria](../blob/main/CRITERIA.md).
+        That document is the standard of record — reading it first will make this
+        form much faster to complete, and it is where the numeric rate-limit
+        requirement is explained in detail.
+
+        Submissions without probe evidence are still accepted. They enter the
+        program as **Experimental** (addressable by explicit model ID) and are
+        promoted once evidence is supplied.
+
+  - type: input
+    id: provider-name
+    attributes:
+      label: Provider name
+      placeholder: Kilo Gateway
+    validations:
+      required: true
+
+  - type: input
+    id: operator
+    attributes:
+      label: Operator
+      description: Organization or project operating the API.
+      placeholder: Example Labs
+    validations:
+      required: true
+
+  - type: input
+    id: contact
+    attributes:
+      label: Technical contact
+      description: A person or issue tracker we can escalate to.
+    validations:
+      required: true
+
+  - type: input
+    id: base-url
+    attributes:
+      label: API base URL
+      description: Versioned base URL. Please note whether hosts rotate.
+      placeholder: https://api.example.com/v1
+    validations:
+      required: true
+
+  - type: input
+    id: auth-method
+    attributes:
+      label: Authentication method
+      description: How a server obtains a credential, and the env var name you would like NAR to read.
+      placeholder: Bearer token via OMNIROUTE_EXAMPLE_API_KEY
+    validations:
+      required: true
+
+  - type: textarea
+    id: rate-limits
+    attributes:
+      label: Published rate limits
+      description: |
+        The single most important field. Please give the numeric limit, its scope
+        (per key, per account, per IP, or global), and the reset cadence
+        (rolling window or fixed window). Include burst and concurrency ceilings
+        if documented.
+      placeholder: |
+        200 requests/hour per API key, rolling window
+        Burst: 20 requests/minute
+        Concurrency: 4
+        Remaining quota exposed via x-ratelimit-remaining headers
+      render: text
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: rate-limit-scope
+    attributes:
+      label: Rate limit scope
+      options:
+        - label: The limit is scoped per key or per account
+          required: false
+        - label: The limit is per IP address
+          required: false
+        - label: No numeric limit is published
+          required: false
+
+  - type: checkboxes
+    id: free-tier
+    attributes:
+      label: Free tier access
+      options:
+        - label: The free tier requires no payment method, deposit, or paid commitment
+          required: true
+        - label: A credit card or paid commitment is required to reach the free tier
+          required: false
+
+  - type: input
+    id: terms-url
+    attributes:
+      label: Terms of service URL
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: terms-aggregation
+    attributes:
+      label: Terms compatibility
+      options:
+        - label: The terms permit automated API use
+          required: true
+        - label: The terms permit gateway aggregation and redistribution of responses to end users
+          required: true
+
+  - type: textarea
+    id: models
+    attributes:
+      label: Model list
+      description: One row per model. Declare vision and tool support explicitly rather than assuming it.
+      placeholder: |
+        | Model ID | Context window | Max output | Vision | Tools |
+        |---|---|---|---|---|
+        | example-model-free | 32768 | 4096 | No | Yes |
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Probe evidence
+      description: |
+        Scripts plus results. The standard is at least 20 requests per model
+        across at least 3 observation windows at different times of day,
+        reproducible and timestamped. Paste results or link a repository.
+      placeholder: |
+        Script: https://github.com/.../probe.mjs
+        Window 1 (09:00 UTC): 20/20 success, TTFT p50 480ms p95 1100ms
+        Window 2 (14:00 UTC): 20/20 success, TTFT p50 510ms p95 1400ms
+        Window 3 (21:00 UTC): 19/20 success, TTFT p50 600ms p95 2600ms
+      render: text
+    validations:
+      required: false
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else
+      description: |
+        Known overload windows, capacity constraints, regional limits, planned
+        changes, or a preferred attribution string for the catalog.
+    validations:
+      required: false
