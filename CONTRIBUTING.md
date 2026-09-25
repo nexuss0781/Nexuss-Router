@@ -1,8 +1,15 @@
-# Free Model Provider Collaboration Program
+# Contributing to Nexuss AI Router
 
 **Nexuss AI Router (NAR)** is inviting free-tier AI model providers to join a live, production routing network. This page is the front door: what the program is, what we ask for, what you get, and how to submit in one issue.
 
 Before you submit, read the standard your submission is measured against: **[Provider & Model Admission Criteria](CRITERIA.md)**.
+
+There are two ways to contribute, and either is welcome:
+
+| I want to… | Do this |
+|---|---|
+| **Get my models into the routing network** | Read [Why we are building this](#why-we-are-building-this) below, then submit an issue |
+| **Improve NAR itself** | See [Contributing code](#contributing-code) |
 
 ---
 
@@ -70,9 +77,28 @@ This program covers **free-tier text, embedding, image, audio, video, and safety
 
 Improvements to the standard itself are welcome and reviewed like any other change. The criteria document is the contract we hold ourselves to, so a change to it needs a rationale and a migration note for affected rows.
 
-- Improve or extend [CRITERIA.md](CRITERIA.md) — open a pull request
-- Submit a provider — open an issue with the provider submission template
-- Report a problem with an admitted provider — open an issue
+**Before you open a pull request**
+
+```bash
+npm install
+node_modules/.bin/tsc --noEmit   # type check
+npm run build                    # production build
+npm run smoke -- https://your-deployment   # live smoke test
+```
+
+Keep changes focused: one concern per pull request, with the reasoning in the description rather than only in the commits.
+
+**What we look for**
+
+- Provider integrations that ship the registry entry, the server-side key mapping, and one metadata row per model together. There is no partial state in which a provider is routable but undocumented.
+- Changes to [CRITERIA.md](CRITERIA.md) that come with a rationale and a migration note for affected rows.
+- Tests. The suite is currently being rebuilt, so a new test that exercises your change is especially welcome.
+- Documentation that keeps public pages accurate and capability-focused.
+
+**Reporting problems**
+
+- Report a problem with an admitted provider — open an issue, include the model ID, timestamp, and status code.
+- Report a gateway defect — open an issue with a reproduction. Include the request path, the model ID, and the response you got instead of the one you expected.
 
 ## Documentation
 

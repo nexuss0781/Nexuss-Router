@@ -4,7 +4,7 @@
 
 This document is the contract. It is used to evaluate submissions, to justify admissions and rejections, and to define what "supported" means to the people building on the gateway.
 
-Related: **[Free Model Provider Collaboration Program](COLLABORATION.md)** — how to submit, and what the program offers in return.
+Related: **[Contributing to Nexuss AI Router](CONTRIBUTING.md)** — how to submit, and what the program offers in return.
 
 ---
 
