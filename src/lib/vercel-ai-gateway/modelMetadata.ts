@@ -23,6 +23,13 @@ const MODEL_METADATA: Record<string, AiModelMetadata> = {
   "mistral/ministral-3b-latest": { family: "Ministral", modality: "text-chat", task_role: "general-chat", quality_tier: "free-edge", priority: "P2-free", confidence: "high", taxonomy_source: "live-omniroute" },
   "mistral/ministral-14b-latest": { family: "Ministral", modality: "text-chat", task_role: "general-reasoning", quality_tier: "free-edge", priority: "P2-free", confidence: "high", taxonomy_source: "live-omniroute" },
   "mistral/codestral-latest": { family: "Codestral", modality: "text-chat", task_role: "code-chat", quality_tier: "free-edge", priority: "P2-free", confidence: "high", taxonomy_source: "live-omniroute" },
+  "nvidia/nvidia/nemotron-3-ultra-550b-a55b": { family: "Nemotron", modality: "text-chat", task_role: "general-reasoning", quality_tier: "frontier-open-weight", priority: "P1-frontier", confidence: "high", taxonomy_source: "live-omniroute" },
+  "nvidia/nvidia/nemotron-3-super-120b-a12b": { family: "Nemotron", modality: "text-chat", task_role: "general-reasoning", quality_tier: "frontier-open-weight", priority: "P1-frontier", confidence: "high", taxonomy_source: "live-omniroute" },
+  "nvidia/google/gemma-4-31b-it": { family: "Gemma", modality: "text-chat", task_role: "general-chat", quality_tier: "frontier-open-weight", priority: "P2-free", confidence: "medium", taxonomy_source: "live-omniroute" },
+  "nvidia/openai/gpt-oss-20b": { family: "GPT-OSS", modality: "text-chat", task_role: "general-reasoning", quality_tier: "frontier-open-weight", priority: "P2-free", confidence: "high", taxonomy_source: "live-omniroute" },
+  "nvidia/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning": { family: "Nemotron", modality: "multimodal-chat", task_role: "general-reasoning", quality_tier: "frontier-open-weight", priority: "P2-free", confidence: "medium", taxonomy_source: "live-omniroute" },
+  "nvidia/nvidia/nemotron-3.5-lightning-30b-a3b": { family: "Nemotron", modality: "text-chat", task_role: "general-chat", quality_tier: "frontier-open-weight", priority: "P2-free", confidence: "low", taxonomy_source: "live-omniroute" },
+  "nvidia/meta/muse-glimmer-30b": { family: "Muse", modality: "multimodal-chat", task_role: "general-reasoning", quality_tier: "frontier-open-weight", priority: "P2-free", confidence: "medium", taxonomy_source: "live-omniroute" },
 };
 
 export function getAiModelMetadata(id: string, provider: string): AiModelMetadata {
