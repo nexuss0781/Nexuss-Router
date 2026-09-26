@@ -1,4 +1,4 @@
-import { INCEPTION_PROVIDER_ID, INCEPTION_TOKEN_FLOOR } from "./inception";
+import { INCEPTION_PROVIDER_ID, INCEPTION_TOKEN_FLOOR, INCEPTION_MAX_COMPLETION_MODELS } from "./inception";
 
 export const GROQ_PROVIDER_ID = "groq";
 export const GROQ_BASE_URL = "https://api.groq.com/openai/v1";
@@ -37,6 +37,14 @@ export function withMaxTokensFloor(body: Record<string, unknown>, model: string)
       ? body.max_completion_tokens
       : 0;
   if (requested >= floor) return { body, applied: 0 };
+  // Inception documents max_completion_tokens and treats the two differently: with
+  // max_tokens set, the denoising passes run the budget down before any content is
+  // emitted, so the same cap returns null content under one name and a real
+  // completion under the other. Verified at 200: max_tokens yields finish_reason
+  // "length" and null, max_completion_tokens yields "stop" and text.
+  if (INCEPTION_MAX_COMPLETION_MODELS.has(model)) {
+    return { body: { ...body, max_completion_tokens: floor, max_tokens: undefined }, applied: floor };
+  }
   return { body: { ...body, max_tokens: floor, max_completion_tokens: undefined }, applied: floor };
 }
 

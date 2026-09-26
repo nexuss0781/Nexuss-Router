@@ -16,6 +16,11 @@ export const INCEPTION_TOKEN_FLOOR: Record<string, number> = {
   "mercury-2": 1024,
 };
 
+// Models whose documented budget parameter is max_completion_tokens rather than
+// max_tokens. Inception returns OpenRouter-style OpenAI params, but the two are not
+// interchangeable here.
+export const INCEPTION_MAX_COMPLETION_MODELS = new Set(Object.keys(INCEPTION_TOKEN_FLOOR));
+
 export function inceptionApiKey(): string {
   return firstEnv("OMNIROUTE_INCEPTION_API_KEY", "INCEPTION_API_KEY", "MERCURY_API_KEY");
 }
