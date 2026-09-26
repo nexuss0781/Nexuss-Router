@@ -1,7 +1,7 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import type { ParadRequestDependencies } from "@/lib/vercel-parad/index.ts";
 import { getAiModelMetadata } from "./modelMetadata";
-import { GROQ_BASE_URL, GROQ_MODELS, GROQ_PROVIDER_ID, latestUserText, promptGuardEnabled, screenPrompt } from "./groq";
+import { GROQ_BASE_URL, GROQ_MODELS, GROQ_PROVIDER_ID, latestUserText, promptGuardEnabled, screenPrompt, supportsNativeToolCalls } from "./groq";
 import {
   listApiKeyPolicies,
   listProviderConnections,
@@ -940,7 +940,7 @@ export async function handleAiOnlyChatCompletions(request: Request, dependencies
   if (!body || typeof body !== "object" || !Array.isArray(body.messages) || body.messages.length === 0) return errorResponse(400, "messages must be a non-empty array");
   if (body.model !== undefined && typeof body.model !== "string") return errorResponse(400, "model must be a string");
 
-  const toolRequest = normalizeChatToolRequest(body);
+  const toolRequest = normalizeChatToolRequest(body, { injectPrompt: !supportsNativeToolCalls(bodyModel(body)) });
   if (toolRequest.invalidToolDefinition) return errorResponse(400, "tools must contain valid function definitions and tool_choice must be valid");
   const requestBody = toolRequest.body;
   const requestedModel = bodyModel(requestBody);

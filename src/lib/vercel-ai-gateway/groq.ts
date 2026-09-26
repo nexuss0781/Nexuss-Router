@@ -7,6 +7,13 @@ export const GROQ_GUARD_MAX_INPUT_CHARS = 1200;
 export const GROQ_GUARD_DEFAULT_THRESHOLD = 0.5;
 export const GROQ_GUARD_TIMEOUT_MS = 10_000;
 
+const NATIVE_TOOL_PROVIDER_PREFIXES = [GROQ_PROVIDER_ID];
+
+export function supportsNativeToolCalls(model: string): boolean {
+  const head = model.split("/", 1)[0];
+  return NATIVE_TOOL_PROVIDER_PREFIXES.includes(head);
+}
+
 function firstEnv(...names: string[]): string {
   for (const name of names) {
     const value = process.env[name]?.trim();
