@@ -1145,7 +1145,7 @@ export async function handleAiOnlyChatCompletions(request: Request, dependencies
           return errorResponse(503, failure.message, failure.code, { "x-omniroute-provider": provider.id, "x-omniroute-model": model, "x-omniroute-attempt-trail": attemptTrailHeader(attemptTrail) });
         }
         const responseBody = await upstream.json().catch(() => ({ error: { message: "Provider returned invalid JSON" } }));
-        const envelope = providerErrorEnvelope(responseBody);
+        const envelope = providerErrorEnvelope(responseBody, upstream.status);
         if (envelope) {
           const failure = toolCompatibleFailure(envelope.failure, wantsTools, isAuto);
           await recordUsage(provider, model, "chat.completions", "failed", {}, policy, startedAt, dependencies);

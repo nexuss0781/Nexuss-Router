@@ -46,6 +46,8 @@ export function classifyFirstStreamFrame(text: string): UpstreamFailure | null {
     } catch {
       continue;
     }
+    // Streamed frames carry no HTTP status of their own, so the body code is the
+    // only signal available here.
     const envelope = providerErrorEnvelope(parsed);
     if (envelope) return envelope.failure;
     return null;
@@ -172,7 +174,7 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 // (kilo-gateway relays Nvidia overloads this way, for example). Forwarding that as a
 // completion hands the client a 200 with no choices, so classify it as a failure and
 // let the next route serve the request.
-export function providerErrorEnvelope(body: unknown): { status: number; failure: UpstreamFailure } | null {
+export function providerErrorEnvelope(body: unknown, httpStatus?: number): { status: number; failure: UpstreamFailure } | null {
   const record = asRecord(body);
   if (!record) return null;
   if (Array.isArray(record.choices) || Array.isArray(record.output)) return null;
@@ -181,7 +183,11 @@ export function providerErrorEnvelope(body: unknown): { status: number; failure:
   const metadata = asRecord(error.metadata);
   const errorType = typeof metadata?.error_type === "string" ? metadata.error_type : typeof error.type === "string" ? error.type : null;
   const numericCode = typeof error.code === "number" ? error.code : typeof error.code === "string" && /^\d{3}$/.test(error.code) ? Number(error.code) : null;
-  const status = numericCode && numericCode >= 400 && numericCode <= 599 ? numericCode : 502;
+  // The wire status is authoritative. A body code is only a fallback, because
+  // aggregators reuse one error shape for several distinct failures and a
+  // mismatch there misroutes the attempt and books the wrong failure budget.
+  const wireStatus = typeof httpStatus === "number" && httpStatus >= 400 && httpStatus <= 599 ? httpStatus : null;
+  const status = wireStatus ?? (numericCode && numericCode >= 400 && numericCode <= 599 ? numericCode : 502);
   const message = typeof error.message === "string" && error.message.trim() ? error.message.trim() : "The upstream provider returned an error envelope";
   if (errorType === "provider_overloaded") return { status, failure: { retryable: true, code: "provider_overloaded", message } };
   if (errorType === "rate_limit_exceeded") return { status, failure: { retryable: true, code: "provider_rate_limited", message } };
