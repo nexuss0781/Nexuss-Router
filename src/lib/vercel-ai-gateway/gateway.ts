@@ -60,6 +60,11 @@ import {
   type RouteProvider,
 } from "./routeHealth";
 import {
+  OPENROUTER_BASE_URL,
+  OPENROUTER_MODELS,
+  OPENROUTER_PROVIDER_ID,
+} from "./openrouter";
+import {
   applyUpstreamRateLimitHeaders,
   consumeRateLimit,
   isRateLimitExhausted,
@@ -163,6 +168,14 @@ const BUILTIN_OPTIONAL_PROVIDERS: AiProvider[] = [
     priority: 990,
     models: GROQ_MODELS,
   },
+  {
+    id: OPENROUTER_PROVIDER_ID,
+    baseUrl: OPENROUTER_BASE_URL,
+    apiKey: "",
+    format: "openai",
+    priority: 970,
+    models: OPENROUTER_MODELS,
+  },
 ];
 
 const EXCLUDED_ORIGINAL_MODELS = new Set([
@@ -201,6 +214,12 @@ const BUILTIN_PROVIDER_ENV: BuiltinProviderEnv[] = [
     apiKeyNames: ["OMNIROUTE_GROQ_API_KEY", "GROQ_API_KEY", "GROQ_GATEWAY_API_KEY"],
     baseUrlNames: ["OMNIROUTE_GROQ_BASE_URL", "GROQ_API_BASE", "GROQ_BASE_URL"],
     modelsNames: ["OMNIROUTE_GROQ_MODELS", "GROQ_MODELS"],
+  },
+  {
+    providerId: OPENROUTER_PROVIDER_ID,
+    apiKeyNames: ["OMNIROUTE_OPENROUTER_API_KEY", "OPENROUTER_API_KEY"],
+    baseUrlNames: ["OMNIROUTE_OPENROUTER_BASE_URL", "OPENROUTER_BASE_URL"],
+    modelsNames: ["OMNIROUTE_OPENROUTER_MODELS", "OPENROUTER_MODELS"],
   },
 ];
 
