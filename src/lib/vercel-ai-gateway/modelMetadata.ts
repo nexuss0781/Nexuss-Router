@@ -22,6 +22,10 @@ const MODEL_METADATA: Record<string, AiModelMetadata> = {
   "openrouter/nvidia/nemotron-3.5-content-safety:free": { family: "Nemotron Safety", modality: "text-chat", task_role: "safety-classifier", quality_tier: "aggregated-free", priority: "P3-aggregated", confidence: "low", taxonomy_source: "live-omniroute" },
   "inception/mercury-2.5": { family: "Mercury", modality: "text-chat", task_role: "general-reasoning", quality_tier: "frontier-diffusion", priority: "P1-frontier", confidence: "medium", taxonomy_source: "live-omniroute" },
   "inception/mercury-2": { family: "Mercury", modality: "text-chat", task_role: "general-reasoning", quality_tier: "frontier-diffusion", priority: "P1-frontier", confidence: "medium", taxonomy_source: "live-omniroute" },
+  "mistral/ministral-8b-latest": { family: "Ministral", modality: "text-chat", task_role: "general-chat", quality_tier: "free-edge", priority: "P2-free", confidence: "high", taxonomy_source: "live-omniroute" },
+  "mistral/ministral-3b-latest": { family: "Ministral", modality: "text-chat", task_role: "general-chat", quality_tier: "free-edge", priority: "P2-free", confidence: "high", taxonomy_source: "live-omniroute" },
+  "mistral/ministral-14b-latest": { family: "Ministral", modality: "text-chat", task_role: "general-reasoning", quality_tier: "free-edge", priority: "P2-free", confidence: "high", taxonomy_source: "live-omniroute" },
+  "mistral/codestral-latest": { family: "Codestral", modality: "text-chat", task_role: "code-chat", quality_tier: "free-edge", priority: "P2-free", confidence: "high", taxonomy_source: "live-omniroute" },
 };
 
 export function getAiModelMetadata(id: string, provider: string): AiModelMetadata {

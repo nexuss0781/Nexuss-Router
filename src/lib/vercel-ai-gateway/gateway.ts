@@ -70,6 +70,12 @@ import {
   OPENROUTER_PROVIDER_ID,
 } from "./openrouter";
 import {
+  MISTRAL_BASE_URL,
+  MISTRAL_MODELS,
+  MISTRAL_PROVIDER_ID,
+  normalizeMistralParams,
+} from "./mistral";
+import {
   applyUpstreamRateLimitHeaders,
   consumeRateLimit,
   isRateLimitExhausted,
@@ -191,6 +197,17 @@ const BUILTIN_OPTIONAL_PROVIDERS: AiProvider[] = [
     priority: 975,
     models: INCEPTION_MODELS,
   },
+  {
+    // Free mode, and the largest measured budget in the stack: 750 req/min and
+    // 1.3M tokens/min on Ministral 3B. Ranks above Kilo and the metered providers,
+    // but below Groq so auto keeps the stronger 27B model as its default.
+    id: MISTRAL_PROVIDER_ID,
+    baseUrl: MISTRAL_BASE_URL,
+    apiKey: "",
+    format: "openai",
+    priority: 985,
+    models: MISTRAL_MODELS,
+  },
 ];
 
 const EXCLUDED_ORIGINAL_MODELS = new Set([
@@ -241,6 +258,12 @@ const BUILTIN_PROVIDER_ENV: BuiltinProviderEnv[] = [
     apiKeyNames: ["OMNIROUTE_INCEPTION_API_KEY", "INCEPTION_API_KEY", "MERCURY_API_KEY"],
     baseUrlNames: ["OMNIROUTE_INCEPTION_BASE_URL", "INCEPTION_BASE_URL"],
     modelsNames: ["OMNIROUTE_INCEPTION_MODELS", "INCEPTION_MODELS"],
+  },
+  {
+    providerId: MISTRAL_PROVIDER_ID,
+    apiKeyNames: ["OMNIROUTE_MISTRAL_API_KEY", "MISTRAL_API_KEY"],
+    baseUrlNames: ["OMNIROUTE_MISTRAL_BASE_URL", "MISTRAL_BASE_URL"],
+    modelsNames: ["OMNIROUTE_MISTRAL_MODELS", "MISTRAL_MODELS"],
   },
 ];
 
@@ -1085,10 +1108,11 @@ export async function handleAiOnlyChatCompletions(request: Request, dependencies
       const startedAt = Date.now();
       try {
         const floored = withMaxTokensFloor(requestBody, upstreamModel);
+        const upstreamBody = provider.id === MISTRAL_PROVIDER_ID ? normalizeMistralParams(floored.body) : floored.body;
         const upstream = await fetch(endpoint, {
           method: "POST",
           headers: upstreamHeaders(provider),
-          body: JSON.stringify({ ...floored.body, model: upstreamModel }),
+          body: JSON.stringify({ ...upstreamBody, model: upstreamModel }),
           signal: controller.signal,
         });
         if (requestBody.stream === true) {

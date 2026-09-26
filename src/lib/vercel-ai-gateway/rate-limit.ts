@@ -23,6 +23,21 @@ export const PROVIDER_RATE_LIMITS: Record<string, RateLimit> = {
   inception: { requestsPerMinute: 1000, inputTokensPerMinute: 1_000_000, outputTokensPerMinute: 100_000, source: "published-free-tier" },
 };
 
+// Mistral sets limits per model rather than per account, and the spread is wide:
+// 750 req/min on Ministral 3B against 30 on 14B. A single provider-level row would
+// either throttle the fastest model to the slowest ceiling or let 14B overshoot by 25x.
+// Counters are already keyed provider|model, so model-scoped limits match that grain.
+// Measured directly from x-ratelimit-* on a free-mode key; see docs.mistral.ai help
+// center for the free/paid tier ladder.
+export const PROVIDER_MODEL_RATE_LIMITS: Record<string, Record<string, RateLimit>> = {
+  mistral: {
+    "ministral-3b-latest": { requestsPerMinute: 750, tokensPerMinute: 1_300_000, source: "measured" },
+    "ministral-8b-latest": { requestsPerMinute: 188, tokensPerMinute: 625_000, source: "measured" },
+    "ministral-14b-latest": { requestsPerMinute: 30, tokensPerMinute: 937_500, source: "measured" },
+    "codestral-latest": { requestsPerMinute: 125, tokensPerMinute: 625_000, source: "measured" },
+  },
+};
+
 type Window = { count: number; resetAt: number };
 type Kind = "rpm" | "rpd" | "tpm" | "itpm" | "otpm";
 
@@ -44,12 +59,12 @@ function read(key: string, span: number, now: number): Window {
   return fresh;
 }
 
-export function rateLimitFor(providerId: string): RateLimit | null {
-  return PROVIDER_RATE_LIMITS[providerId] ?? null;
+export function rateLimitFor(providerId: string, model = ""): RateLimit | null {
+  return PROVIDER_MODEL_RATE_LIMITS[providerId]?.[model] ?? PROVIDER_RATE_LIMITS[providerId] ?? null;
 }
 
 function exhausted(providerId: string, model: string, now = Date.now()): boolean {
-  const limit = rateLimitFor(providerId);
+  const limit = rateLimitFor(providerId, model);
   if (!limit) return false;
   const checks: [Kind, number | undefined, number][] = [
     ["rpm", limit.requestsPerMinute, MINUTE_MS],
@@ -70,7 +85,7 @@ export function isRateLimitExhausted(provider: RateLimitProvider, model: string)
 }
 
 export function consumeRateLimit(provider: RateLimitProvider, model: string, usage: { inputTokens?: number; outputTokens?: number } = {}): void {
-  const limit = rateLimitFor(provider.id);
+  const limit = rateLimitFor(provider.id, model);
   if (!limit) return;
   const now = Date.now();
   const key = (kind: Kind) => windowKey(provider.id, model, kind);
@@ -84,7 +99,7 @@ export function consumeRateLimit(provider: RateLimitProvider, model: string, usa
 }
 
 export function noteRateLimitRejected(provider: RateLimitProvider, model: string, resetAtMs?: number): void {
-  const limit = rateLimitFor(provider.id);
+  const limit = rateLimitFor(provider.id, model);
   if (!limit) return;
   const now = Date.now();
   const until = resetAtMs && resetAtMs > now ? resetAtMs : now + MINUTE_MS;
@@ -101,14 +116,22 @@ export function noteRateLimitRejected(provider: RateLimitProvider, model: string
 }
 
 export function applyUpstreamRateLimitHeaders(provider: RateLimitProvider, model: string, headers: Headers): void {
-  const remaining = headers.get("x-ratelimit-remaining-tokens");
-  if (remaining !== null) {
-    const parsed = Number.parseFloat(remaining);
-    if (Number.isFinite(parsed) && parsed <= 0) {
-      const reset = headers.get("x-ratelimit-reset-tokens");
-      const seconds = reset ? Number.parseFloat(reset) : 0;
-      noteRateLimitRejected(provider, model, Number.isFinite(seconds) && seconds > 0 ? Date.now() + seconds * 1000 : undefined);
-    }
+  // Groq publishes one remaining-token counter plus a reset hint. Mistral publishes
+  // full request and token budgets but no reset hint, so an exhausted Mistral model
+  // takes the conservative one-minute hold. Either family reaching zero means this
+  // model is done for the window, which is far tighter than waiting out a guessed
+  // ceiling after the fact.
+  const groqTokens = Number.parseFloat(headers.get("x-ratelimit-remaining-tokens") ?? "");
+  if (Number.isFinite(groqTokens) && groqTokens <= 0) {
+    const reset = headers.get("x-ratelimit-reset-tokens");
+    const seconds = reset ? Number.parseFloat(reset) : 0;
+    noteRateLimitRejected(provider, model, Number.isFinite(seconds) && seconds > 0 ? Date.now() + seconds * 1000 : undefined);
+    return;
+  }
+  const mistralRequests = Number.parseFloat(headers.get("x-ratelimit-remaining-req-minute") ?? "");
+  const mistralTokens = Number.parseFloat(headers.get("x-ratelimit-remaining-tokens-minute") ?? "");
+  if ((Number.isFinite(mistralRequests) && mistralRequests <= 0) || (Number.isFinite(mistralTokens) && mistralTokens <= 0)) {
+    noteRateLimitRejected(provider, model);
   }
 }
 
@@ -124,7 +147,7 @@ export type RateLimitSnapshot = {
 };
 
 export function rateLimitSnapshot(providerId: string, model: string): RateLimitSnapshot | null {
-  const limit = rateLimitFor(providerId);
+  const limit = rateLimitFor(providerId, model);
   if (!limit) return null;
   const now = Date.now();
   const pick = (kind: Kind, cap: number | undefined, span: number) =>

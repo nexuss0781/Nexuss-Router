@@ -1,4 +1,5 @@
 import { INCEPTION_PROVIDER_ID, INCEPTION_TOKEN_FLOOR, INCEPTION_MAX_COMPLETION_MODELS } from "./inception";
+import { MISTRAL_PROVIDER_ID } from "./mistral";
 
 export const GROQ_PROVIDER_ID = "groq";
 export const GROQ_BASE_URL = "https://api.groq.com/openai/v1";
@@ -9,7 +10,7 @@ export const GROQ_GUARD_MAX_INPUT_CHARS = 1200;
 export const GROQ_GUARD_DEFAULT_THRESHOLD = 0.5;
 export const GROQ_GUARD_TIMEOUT_MS = 10_000;
 
-const NATIVE_TOOL_PROVIDER_PREFIXES = [GROQ_PROVIDER_ID, INCEPTION_PROVIDER_ID];
+const NATIVE_TOOL_PROVIDER_PREFIXES = [GROQ_PROVIDER_ID, INCEPTION_PROVIDER_ID, MISTRAL_PROVIDER_ID];
 
 export function supportsNativeToolCalls(model: string): boolean {
   const head = model.split("/", 1)[0];
