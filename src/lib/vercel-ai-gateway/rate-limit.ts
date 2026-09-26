@@ -5,6 +5,7 @@ export type RateLimit = {
   requestsPerDay?: number;
   tokensPerMinute?: number;
   inputTokensPerMinute?: number;
+  outputTokensPerMinute?: number;
   source?: string;
 };
 
@@ -15,13 +16,15 @@ export const PROVIDER_RATE_LIMITS: Record<string, RateLimit> = {
   "kilo-gateway": {},
   groq: { requestsPerMinute: 1000, tokensPerMinute: 8000, inputTokensPerMinute: 7000, source: "measured" },
   openrouter: { requestsPerMinute: 20, requestsPerDay: 50, source: "measured" },
-  // Inception returns no rate-limit headers and publishes no numeric ceiling, so
-  // there is nothing to enforce and the route is never skipped for budget.
-  inception: {},
+  // Published at docs.inceptionlabs.ai/get-started/rate-limits. Free tier assumed,
+  // since keys ship with a free token grant; Pay As You Go is 3x every row. Inception
+  // sends no rate-limit headers and exposes no balance endpoint, so this is the only
+  // signal available and is enforced conservatively.
+  inception: { requestsPerMinute: 1000, inputTokensPerMinute: 1_000_000, outputTokensPerMinute: 100_000, source: "published-free-tier" },
 };
 
 type Window = { count: number; resetAt: number };
-type Kind = "rpm" | "rpd" | "tpm" | "itpm";
+type Kind = "rpm" | "rpd" | "tpm" | "itpm" | "otpm";
 
 const windows = new Map<string, Window>();
 
@@ -53,6 +56,7 @@ function exhausted(providerId: string, model: string, now = Date.now()): boolean
     ["rpd", limit.requestsPerDay, DAY_MS],
     ["tpm", limit.tokensPerMinute, MINUTE_MS],
     ["itpm", limit.inputTokensPerMinute, MINUTE_MS],
+    ["otpm", limit.outputTokensPerMinute, MINUTE_MS],
   ];
   for (const [kind, cap, span] of checks) {
     if (cap === undefined || cap <= 0) continue;
@@ -76,6 +80,7 @@ export function consumeRateLimit(provider: RateLimitProvider, model: string, usa
   const output = usage.outputTokens ?? 0;
   if (limit.tokensPerMinute) read(key("tpm"), MINUTE_MS, now).count += input + output;
   if (limit.inputTokensPerMinute) read(key("itpm"), MINUTE_MS, now).count += input;
+  if (limit.outputTokensPerMinute) read(key("otpm"), MINUTE_MS, now).count += output;
 }
 
 export function noteRateLimitRejected(provider: RateLimitProvider, model: string, resetAtMs?: number): void {
@@ -88,6 +93,7 @@ export function noteRateLimitRejected(provider: RateLimitProvider, model: string
     ["rpd", limit.requestsPerDay, DAY_MS],
     ["tpm", limit.tokensPerMinute, MINUTE_MS],
     ["itpm", limit.inputTokensPerMinute, MINUTE_MS],
+    ["otpm", limit.outputTokensPerMinute, MINUTE_MS],
   ] as [Kind, number | undefined, number][]) {
     if (cap === undefined || cap <= 0) continue;
     windows.set(windowKey(provider.id, model, kind), { count: cap, resetAt: until > now + span ? until : now + span });
@@ -113,6 +119,7 @@ export type RateLimitSnapshot = {
   rpd?: { used: number; limit: number };
   tpm?: { used: number; limit: number };
   itpm?: { used: number; limit: number };
+  otpm?: { used: number; limit: number };
   exhausted: boolean;
 };
 
@@ -129,6 +136,7 @@ export function rateLimitSnapshot(providerId: string, model: string): RateLimitS
     rpd: pick("rpd", limit.requestsPerDay, DAY_MS),
     tpm: pick("tpm", limit.tokensPerMinute, MINUTE_MS),
     itpm: pick("itpm", limit.inputTokensPerMinute, MINUTE_MS),
+    otpm: pick("otpm", limit.outputTokensPerMinute, MINUTE_MS),
     exhausted: exhausted(providerId, model, now),
   };
 }
