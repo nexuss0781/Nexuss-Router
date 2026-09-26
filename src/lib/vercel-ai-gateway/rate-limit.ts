@@ -16,11 +16,6 @@ export const PROVIDER_RATE_LIMITS: Record<string, RateLimit> = {
   "kilo-gateway": {},
   groq: { requestsPerMinute: 1000, tokensPerMinute: 8000, inputTokensPerMinute: 7000, source: "measured" },
   openrouter: { requestsPerMinute: 20, requestsPerDay: 50, source: "measured" },
-  // Published at docs.inceptionlabs.ai/get-started/rate-limits. Free tier assumed,
-  // since keys ship with a free token grant; Pay As You Go is 3x every row. Inception
-  // sends no rate-limit headers and exposes no balance endpoint, so this is the only
-  // signal available and is enforced conservatively.
-  inception: { requestsPerMinute: 1000, inputTokensPerMinute: 1_000_000, outputTokensPerMinute: 100_000, source: "published-free-tier" },
   // NVIDIA's trial tier throttles per model with no published limit, no rate-limit
   // headers, and no quota endpoint, so the ceiling is measured. A single provider-level
   // row is the correct shape here: every registered model was measured at the same
