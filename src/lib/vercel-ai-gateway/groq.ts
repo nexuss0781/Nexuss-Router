@@ -14,6 +14,28 @@ export function supportsNativeToolCalls(model: string): boolean {
   return NATIVE_TOOL_PROVIDER_PREFIXES.includes(head);
 }
 
+export const GROQ_REASONING_TOKEN_FLOOR: Record<string, number> = {
+  "openai/gpt-oss-120b": 1024,
+};
+
+export function minMaxTokensFor(model: string): number {
+  const override = Number.parseInt(firstEnv("OMNIROUTE_GROQ_MIN_MAX_TOKENS"), 10);
+  if (Number.isFinite(override) && override > 0) return override;
+  return GROQ_REASONING_TOKEN_FLOOR[model] ?? 0;
+}
+
+export function withMaxTokensFloor(body: Record<string, unknown>, model: string): { body: Record<string, unknown>; applied: number } {
+  const floor = minMaxTokensFor(model);
+  if (!floor) return { body, applied: 0 };
+  const requested = typeof body.max_tokens === "number"
+    ? body.max_tokens
+    : typeof body.max_completion_tokens === "number"
+      ? body.max_completion_tokens
+      : 0;
+  if (requested >= floor) return { body, applied: 0 };
+  return { body: { ...body, max_tokens: floor, max_completion_tokens: undefined }, applied: floor };
+}
+
 function firstEnv(...names: string[]): string {
   for (const name of names) {
     const value = process.env[name]?.trim();

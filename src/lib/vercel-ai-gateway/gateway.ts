@@ -1,7 +1,7 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import type { ParadRequestDependencies } from "@/lib/vercel-parad/index.ts";
 import { getAiModelMetadata } from "./modelMetadata";
-import { GROQ_BASE_URL, GROQ_MODELS, GROQ_PROVIDER_ID, latestUserText, promptGuardEnabled, screenPrompt, supportsNativeToolCalls } from "./groq";
+import { GROQ_BASE_URL, GROQ_MODELS, GROQ_PROVIDER_ID, latestUserText, promptGuardEnabled, screenPrompt, supportsNativeToolCalls, withMaxTokensFloor } from "./groq";
 import {
   listApiKeyPolicies,
   listProviderConnections,
@@ -1027,10 +1027,11 @@ export async function handleAiOnlyChatCompletions(request: Request, dependencies
       const timeout = setTimeout(() => controller.abort(), deadline);
       const startedAt = Date.now();
       try {
+        const floored = withMaxTokensFloor(requestBody, upstreamModel);
         const upstream = await fetch(endpoint, {
           method: "POST",
           headers: upstreamHeaders(provider),
-          body: JSON.stringify({ ...requestBody, model: upstreamModel }),
+          body: JSON.stringify({ ...floored.body, model: upstreamModel }),
           signal: controller.signal,
         });
         if (requestBody.stream === true) {
@@ -1101,12 +1102,13 @@ export async function handleAiOnlyChatCompletions(request: Request, dependencies
         const normalizedResponseBody = normalizeChatToolResponse(responseBody, toolWorkflow ? route : null);
         await recordUsage(provider, model, "chat.completions", "succeeded", normalizedResponseBody, policy, startedAt, dependencies);
         const responseHeaders: Record<string, string> = { "x-omniroute-provider": provider.id, "x-omniroute-model": model, "x-omniroute-routing-class": phase };
+        if (floored.applied) responseHeaders["x-omniroute-max-tokens-floor"] = String(floored.applied);
         if (toolWorkflow) {
           responseHeaders["x-omniroute-tool-protocol"] = OMNIROUTE_TOOL_PROTOCOL;
           responseHeaders[OMNIROUTE_TOOL_AFFINITY_HEADER] = encodeToolAffinity(route);
         }
         const response = jsonResponse(normalizedResponseBody, upstream.status, responseHeaders);
-        if (isAuto && !hasUsableAssistantText(normalizedResponseBody, wantsTools)) {
+        if ((isAuto || floored.applied) && !hasUsableAssistantText(normalizedResponseBody, wantsTools)) {
           lastRetryableStatus = 502;
           lastFailureMessage = "The upstream provider returned a completion with no readable text";
           lastFailureCode = "provider_empty_completion";
