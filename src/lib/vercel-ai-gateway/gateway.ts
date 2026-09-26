@@ -57,7 +57,21 @@ import {
   providerRouteKey,
   toolDemotedProviders as demotedToolProviders,
   toolTally,
+  type RouteProvider,
 } from "./routeHealth";
+import {
+  applyUpstreamRateLimitHeaders,
+  consumeRateLimit,
+  isRateLimitExhausted,
+  noteRateLimitRejected,
+} from "./rate-limit";
+
+// A published 429 means the request counted against the budget even though it did not
+// complete, so the rejection is booked against the same window as a success.
+function noteFailure(provider: RouteProvider, model: string, status: number): void {
+  noteProviderFailure(provider, model, status);
+  if (status === 429) noteRateLimitRejected(provider, model);
+}
 
 const MAX_CHAT_BODY_BYTES = 4 * 1024 * 1024;
 const MAX_PROVIDER_TIMEOUT_MS = 240_000;
@@ -498,7 +512,7 @@ export async function handleAiOnlyJsonEndpoint(
   const upstreamPath = (options.upstreamPath || endpoint).replace(/^\/+|\/+$/g, "");
   const failures: UpstreamFailure[] = [];
   for (const provider of candidates) {
-    if (isProviderCoolingDown(provider, model)) continue;
+    if (isProviderCoolingDown(provider, model) || isRateLimitExhausted(provider, model)) continue;
     const upstreamModel = model === "auto" ? model : providerModel(model, provider);
     const upstreamBody = model === "auto" || typeof body.model !== "string" ? body : { ...body, model: upstreamModel };
     const upstreamUrl = `${provider.baseUrl}/${upstreamPath}`;
@@ -511,7 +525,7 @@ export async function handleAiOnlyJsonEndpoint(
         if (!upstream.ok) {
           const failure = classifyUpstreamStatus(upstream.status) || { retryable: true, code: "provider_unavailable", message: "The upstream provider could not serve the request" };
           failures.push(failure);
-          noteProviderFailure(provider, model, upstream.status);
+          noteFailure(provider, model, upstream.status);
           await recordUsage(provider, model, options.endpointName || endpoint, "failed", {}, policy, startedAt, dependencies);
           if (failure.retryable) continue;
           return errorResponse(503, failure.message, failure.code, retryHeaderNames(failures));
@@ -521,7 +535,7 @@ export async function handleAiOnlyJsonEndpoint(
       if (!upstream.ok) {
         const failure = classifyUpstreamStatus(upstream.status) || { retryable: true, code: "provider_unavailable", message: "The upstream provider could not serve the request" };
         failures.push(failure);
-        noteProviderFailure(provider, model, upstream.status);
+        noteFailure(provider, model, upstream.status);
         await recordUsage(provider, model, options.endpointName || endpoint, "failed", {}, policy, startedAt, dependencies);
         if (failure.retryable) continue;
         return errorResponse(503, failure.message, failure.code, retryHeaderNames(failures));
@@ -537,7 +551,7 @@ export async function handleAiOnlyJsonEndpoint(
     } catch (error) {
       const timedOut = error instanceof Error && error.name === "AbortError";
       failures.push({ retryable: true, code: "provider_timeout", message: timedOut ? "The provider request timed out" : "The provider request failed" });
-      noteProviderFailure(provider, model, timedOut ? 408 : 500);
+      noteFailure(provider, model, timedOut ? 408 : 500);
       await recordUsage(provider, model, options.endpointName || endpoint, "failed", {}, policy, startedAt, dependencies);
       continue;
     } finally {
@@ -603,7 +617,7 @@ export async function handleAiOnlyMultipartEndpoint(
       if (!upstream.ok) {
         const failure = classifyUpstreamStatus(upstream.status) || { retryable: true, code: "provider_unavailable", message: "The upstream provider could not serve the request" };
         failures.push(failure);
-        noteProviderFailure(provider, model, upstream.status);
+        noteFailure(provider, model, upstream.status);
         await recordUsage(provider, model, options.endpointName || endpoint, "failed", {}, policy, startedAt, dependencies);
         if (failure.retryable) continue;
         return errorResponse(503, failure.message, failure.code, retryHeaderNames(failures));
@@ -614,7 +628,7 @@ export async function handleAiOnlyMultipartEndpoint(
     } catch (error) {
       const timedOut = error instanceof Error && error.name === "AbortError";
       failures.push({ retryable: true, code: "provider_timeout", message: timedOut ? "The provider request timed out" : "The provider request failed" });
-      noteProviderFailure(provider, model, timedOut ? 408 : 500);
+      noteFailure(provider, model, timedOut ? 408 : 500);
       await recordUsage(provider, model, options.endpointName || endpoint, "failed", {}, policy, startedAt, dependencies);
       continue;
     } finally {
@@ -993,13 +1007,16 @@ export async function handleAiOnlyChatCompletions(request: Request, dependencies
     const providerCandidates = selectProviders(providers, model).filter((provider) => !options.providerId || provider.id === options.providerId);
     for (const provider of providerCandidates) {
       const coolingDown = isProviderCoolingDown(provider, model);
+      const rateLimited = isRateLimitExhausted(provider, model);
       // When every candidate is in cooldown, still give the top of the pool one
       // best-effort attempt so a saturated free pool degrades onto a real probe
       // instead of failing out with no attempt at all. Tool workflows get one
       // probe per route, otherwise a single leading route would consume the only
       // bypass and starve a healthy model of the same provider further down.
-      if (coolingDown && (cooldownBypassRoutes.has(modelRouteKey(provider, model)) || (!wantsTools && (attemptedAny || cooldownBypassUsed)))) continue;
-      if (coolingDown) {
+      // A spent published budget joins the same pool: the point of a limit here is
+      // to fall through to the next model, not to fail the request on this one.
+      if ((coolingDown || rateLimited) && (cooldownBypassRoutes.has(modelRouteKey(provider, model)) || (!wantsTools && (attemptedAny || cooldownBypassUsed)))) continue;
+      if (coolingDown || rateLimited) {
         cooldownBypassRoutes.add(modelRouteKey(provider, model));
         if (!wantsTools) cooldownBypassUsed = true;
       }
@@ -1042,7 +1059,7 @@ export async function handleAiOnlyChatCompletions(request: Request, dependencies
             await recordUsage(provider, model, "chat.completions", "failed", {}, policy, startedAt, dependencies);
             lastRetryableStatus = status;
             attemptTrail.push(`${model}:${status}`);
-            noteProviderFailure(provider, model, status);
+            noteFailure(provider, model, status);
             if (wantsTools) noteToolResult(provider, model, false);
             if (failure.retryable) continue;
             return errorResponse(503, failure.message, failure.code, { "x-omniroute-provider": provider.id, "x-omniroute-model": model, "x-omniroute-attempt-trail": attemptTrailHeader(attemptTrail) });
@@ -1057,12 +1074,14 @@ export async function handleAiOnlyChatCompletions(request: Request, dependencies
             lastFailureMessage = failure.message;
             lastFailureCode = failure.code;
             attemptTrail.push(`${model}:${failure.code}`);
-            noteProviderFailure(provider, model, 503);
+            noteFailure(provider, model, 503);
             if (wantsTools) noteToolResult(provider, model, false);
             if (failure.retryable) continue;
             return errorResponse(503, failure.message, failure.code, { "x-omniroute-provider": provider.id, "x-omniroute-model": model, "x-omniroute-attempt-trail": attemptTrailHeader(attemptTrail) });
           }
           noteProviderSuccess(provider, model);
+          applyUpstreamRateLimitHeaders(provider, model, upstream.headers);
+          consumeRateLimit(provider, model);
           if (wantsTools) noteToolResult(provider, model, true);
           const sourceStream = toolWorkflow ? canonicalizeToolCallStream(preflight.stream, route) : preflight.stream;
           const stream = streamWithUsage(sourceStream, () => void recordUsage(provider, model, "chat.completions", "succeeded", {}, policy, startedAt, dependencies));
@@ -1078,7 +1097,7 @@ export async function handleAiOnlyChatCompletions(request: Request, dependencies
           await recordUsage(provider, model, "chat.completions", "failed", {}, policy, startedAt, dependencies);
           lastRetryableStatus = upstream.status;
           attemptTrail.push(`${model}:${upstream.status}`);
-          noteProviderFailure(provider, model, upstream.status);
+          noteFailure(provider, model, upstream.status);
           if (wantsTools) noteToolResult(provider, model, false);
           lastFailureMessage = failure.message;
           lastFailureCode = failure.code;
@@ -1094,7 +1113,7 @@ export async function handleAiOnlyChatCompletions(request: Request, dependencies
           lastFailureMessage = failure.message;
           lastFailureCode = failure.code;
           attemptTrail.push(`${model}:${envelope.status}`);
-          noteProviderFailure(provider, model, envelope.status);
+          noteFailure(provider, model, envelope.status);
           if (wantsTools) noteToolResult(provider, model, false);
           if (failure.retryable) continue;
           return errorResponse(503, failure.message, failure.code, { "x-omniroute-provider": provider.id, "x-omniroute-model": model, "x-omniroute-attempt-trail": attemptTrailHeader(attemptTrail) });
@@ -1113,11 +1132,14 @@ export async function handleAiOnlyChatCompletions(request: Request, dependencies
           lastFailureMessage = "The upstream provider returned a completion with no readable text";
           lastFailureCode = "provider_empty_completion";
           attemptTrail.push(`${model}:502`);
-          noteProviderFailure(provider, model, 502);
+          noteFailure(provider, model, 502);
           if (wantsTools) noteToolResult(provider, model, false);
           continue;
         }
         noteProviderSuccess(provider, model);
+        applyUpstreamRateLimitHeaders(provider, model, upstream.headers);
+        const usage = extractUsage(normalizedResponseBody);
+        consumeRateLimit(provider, model, { inputTokens: usage.inputTokens ?? undefined, outputTokens: usage.outputTokens ?? undefined });
         if (wantsTools) noteToolResult(provider, model, true);
         return response;
       } catch (error) {
@@ -1127,7 +1149,7 @@ export async function handleAiOnlyChatCompletions(request: Request, dependencies
         lastFailureMessage = message;
         lastFailureCode = "provider_timeout";
         attemptTrail.push(`${model}:408`);
-        noteProviderFailure(provider, model, 408);
+        noteFailure(provider, model, 408);
         if (wantsTools) noteToolResult(provider, model, false);
       } finally {
         clearTimeout(timeout);
