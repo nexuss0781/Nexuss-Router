@@ -1,4 +1,3 @@
-import { INCEPTION_PROVIDER_ID, INCEPTION_TOKEN_FLOOR, INCEPTION_MAX_COMPLETION_MODELS } from "./inception";
 import { MISTRAL_PROVIDER_ID } from "./mistral";
 import { NVIDIA_PROVIDER_ID } from "./nvidia";
 
@@ -14,7 +13,7 @@ export const GROQ_GUARD_TIMEOUT_MS = 10_000;
 // NVIDIA was verified to emit native tool_calls with well-formed arguments on every
 // registered model, so it skips prompt-based tool injection for the same reason as the
 // others: the upstream already speaks the protocol.
-const NATIVE_TOOL_PROVIDER_PREFIXES = [GROQ_PROVIDER_ID, INCEPTION_PROVIDER_ID, MISTRAL_PROVIDER_ID, NVIDIA_PROVIDER_ID];
+const NATIVE_TOOL_PROVIDER_PREFIXES = [GROQ_PROVIDER_ID, MISTRAL_PROVIDER_ID, NVIDIA_PROVIDER_ID];
 
 export function supportsNativeToolCalls(model: string): boolean {
   const head = model.split("/", 1)[0];
@@ -25,12 +24,12 @@ export const GROQ_REASONING_TOKEN_FLOOR: Record<string, number> = {
   "openai/gpt-oss-120b": 1024,
 };
 
-// Upstream model names are provider-unique here, so one lookup covers both floors
-// without the caller having to know which provider it is routing to.
+// Upstream model names are provider-unique here, so one lookup covers the floor without
+// the caller having to know which provider it is routing to.
 export function minMaxTokensFor(model: string): number {
   const override = Number.parseInt(firstEnv("OMNIROUTE_GROQ_MIN_MAX_TOKENS"), 10);
   if (Number.isFinite(override) && override > 0) return override;
-  return GROQ_REASONING_TOKEN_FLOOR[model] ?? INCEPTION_TOKEN_FLOOR[model] ?? 0;
+  return GROQ_REASONING_TOKEN_FLOOR[model] ?? 0;
 }
 
 export function withMaxTokensFloor(body: Record<string, unknown>, model: string): { body: Record<string, unknown>; applied: number } {
@@ -42,14 +41,6 @@ export function withMaxTokensFloor(body: Record<string, unknown>, model: string)
       ? body.max_completion_tokens
       : 0;
   if (requested >= floor) return { body, applied: 0 };
-  // Inception documents max_completion_tokens and treats the two differently: with
-  // max_tokens set, the denoising passes run the budget down before any content is
-  // emitted, so the same cap returns null content under one name and a real
-  // completion under the other. Verified at 200: max_tokens yields finish_reason
-  // "length" and null, max_completion_tokens yields "stop" and text.
-  if (INCEPTION_MAX_COMPLETION_MODELS.has(model)) {
-    return { body: { ...body, max_completion_tokens: floor, max_tokens: undefined }, applied: floor };
-  }
   return { body: { ...body, max_tokens: floor, max_completion_tokens: undefined }, applied: floor };
 }
 
