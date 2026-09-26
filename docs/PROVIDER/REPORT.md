@@ -1,14 +1,22 @@
 # Provider access audit — consolidated report
 
 **Date:** 2026-09-26 · **Repo:** `Omnirouter-vercel` @ `main`, last pushed `8486308` · **Production:** `omniouter-vercel.vercel.app`
-**Status:** No OpenRouter integration exists. Runtime is Kilo-only, 2 models. Nothing below is wired into the app.
+**Status:** OpenRouter is still not integrated. **Groq is live in production** — 2 chat models plus a live prompt guard, 12/12 verification green. See §17 of `OPENROUTER.md`.
 
 ---
 
 ## 1. Headline
 
-Nothing is admitted. The audit has produced four provider evaluations, one significant
-correction to earlier work, and a list of blockers that are mostly *not* about technology.
+Of the audited providers, **only Groq is integrated** — it is serving in production with two
+chat models and a working prompt guard. The rest remain unadmitted. The audit has produced four
+provider evaluations, one significant correction to earlier work, and a list of blockers that
+are mostly *not* about technology.
+
+Three defects surfaced only in the real gateway, none visible from provider-side testing:
+gpt-oss emitting a call to a nonexistent tool named `json` (the gateway's own injected protocol
+prompt contained literal JSON examples), gpt-oss returning `content: ""` when reasoning
+exhausted a small `max_tokens`, and an empty-completion guard that only covered `auto` routing.
+All three are fixed and covered by the verification suite.
 
 The most important finding is that **four of the eight evaluation targets are unroutable dead
 entries** — listed in the OpenRouter catalog at `$0/$0` with no serving endpoint behind them.
@@ -60,7 +68,7 @@ also routable and were not in the target set.
 | AionLabs | 2 | no — $0.70–3.00/M | prior written consent, §5.2 ambiguous | no |
 | Cohere | 14 | no | none — "timesharing, service bureau" barred | no |
 | Friendli | 40 | no — $0.14–1.40/M | **Partners channel**, gateway blessed but §8(f) bars it | no |
-| Groq | 44 | **yes** | **§6.3(c) "except as expressly approved by Groq"** | no |
+| Groq | 44 | **yes** | **§6.3(c) "except as expressly approved by Groq"** | **LIVE** |
 
 **A8.3 ranking.** Groq is the only provider whose resale ban carries an explicit written-approval
 carve-out — a defined, purchasable path rather than a prohibition. Friendli defines "Model
