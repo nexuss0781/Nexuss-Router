@@ -1,6 +1,7 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import type { ParadRequestDependencies } from "@/lib/vercel-parad/index.ts";
 import { getAiModelMetadata } from "./modelMetadata";
+import { GROQ_BASE_URL, GROQ_MODELS, GROQ_PROVIDER_ID, latestUserText, promptGuardEnabled, screenPrompt } from "./groq";
 import {
   listApiKeyPolicies,
   listProviderConnections,
@@ -140,6 +141,14 @@ const BUILTIN_OPTIONAL_PROVIDERS: AiProvider[] = [
       "arcee-ai/trinity-large-preview:free",
     ],
   },
+  {
+    id: GROQ_PROVIDER_ID,
+    baseUrl: GROQ_BASE_URL,
+    apiKey: "",
+    format: "openai",
+    priority: 990,
+    models: GROQ_MODELS,
+  },
 ];
 
 const EXCLUDED_ORIGINAL_MODELS = new Set([
@@ -172,6 +181,12 @@ const BUILTIN_PROVIDER_ENV: BuiltinProviderEnv[] = [
     apiKeyNames: ["OMNIROUTE_KILO_API_KEY", "KILO_GATEWAY_API_KEY", "KILO_API_KEY"],
     baseUrlNames: ["OMNIROUTE_KILO_BASE_URL", "KILO_GATEWAY_BASE_URL", "KILO_BASE_URL"],
     modelsNames: ["OMNIROUTE_KILO_MODELS", "KILO_GATEWAY_MODELS", "KILO_MODELS"],
+  },
+  {
+    providerId: GROQ_PROVIDER_ID,
+    apiKeyNames: ["OMNIROUTE_GROQ_API_KEY", "GROQ_API_KEY", "GROQ_GATEWAY_API_KEY"],
+    baseUrlNames: ["OMNIROUTE_GROQ_BASE_URL", "GROQ_API_BASE", "GROQ_BASE_URL"],
+    modelsNames: ["OMNIROUTE_GROQ_MODELS", "GROQ_MODELS"],
   },
 ];
 
@@ -946,6 +961,12 @@ export async function handleAiOnlyChatCompletions(request: Request, dependencies
   const providerScope = options.providerId || requestedProviderScope;
   const policyFailure = policyAllows(policy, "chat.completions", requestedModel);
   if (policyFailure) return policyFailure;
+  if (promptGuardEnabled()) {
+    const screen = await screenPrompt(latestUserText(requestBody.messages));
+    if (screen.blocked) {
+      return errorResponse(400, `Request blocked by prompt guard (score ${screen.score})`, "prompt_guard_blocked", { "x-omniroute-guard-score": String(screen.score) });
+    }
+  }
   const providers = await listProviders(dependencies);
   const wantsTools = toolRequest.hasToolIntent;
   const toolWorkflow = wantsTools || toolRequest.hasToolResult;

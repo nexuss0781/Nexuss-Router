@@ -13,6 +13,9 @@ const MODEL_METADATA: Record<string, AiModelMetadata> = {
   "kilo-gateway/nvidia/nemotron-3-super-120b-a12b:free": { family: "Nemotron/NVIDIA", modality: "text-chat", task_role: "general-chat", quality_tier: "curated-gateway", priority: "P2-curated-gateway", confidence: "low", taxonomy_source: "live-omniroute" },
   "kilo-gateway/arcee-ai/trinity-large-preview:free": { family: "Other Open Model", modality: "text-chat", task_role: "general-chat", quality_tier: "curated-gateway", priority: "P2-curated-gateway", confidence: "low", taxonomy_source: "live-omniroute" },
   "kilo-gateway/kilo-auto/free": { family: "Other Open Model", modality: "text-chat", task_role: "general-chat", quality_tier: "curated-gateway", priority: "P2-curated-gateway", confidence: "low", taxonomy_source: "live-omniroute" },
+  "groq/qwen/qwen3.8-27b": { family: "Qwen", modality: "text-chat", task_role: "general-reasoning", quality_tier: "frontier-open-weight", priority: "P1-frontier", confidence: "medium", taxonomy_source: "live-omniroute" },
+  "groq/openai/gpt-oss-120b": { family: "GPT-OSS", modality: "text-chat", task_role: "general-reasoning", quality_tier: "frontier-open-weight", priority: "P1-frontier", confidence: "medium", taxonomy_source: "live-omniroute" },
+  "groq/meta-llama/llama-prompt-guard-2-86m": { family: "Llama Guard", modality: "text-chat", task_role: "safety-classifier", quality_tier: "specialized-guard", priority: "P-specialized", confidence: "medium", taxonomy_source: "live-omniroute" },
 };
 
 export function getAiModelMetadata(id: string, provider: string): AiModelMetadata {

@@ -5,3 +5,9 @@ node_modules
 *.log
 tsconfig.tsbuildinfo
 PRIVATE*.md
+# Root-anchored: research working files, not the tracked dossier in docs/PROVIDER/
+/PROVIDER.md
+# Editor swap/backup files
+*.swp
+*.swo
+*~
