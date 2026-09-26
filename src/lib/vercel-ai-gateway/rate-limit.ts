@@ -21,6 +21,12 @@ export const PROVIDER_RATE_LIMITS: Record<string, RateLimit> = {
   // sends no rate-limit headers and exposes no balance endpoint, so this is the only
   // signal available and is enforced conservatively.
   inception: { requestsPerMinute: 1000, inputTokensPerMinute: 1_000_000, outputTokensPerMinute: 100_000, source: "published-free-tier" },
+  // NVIDIA's trial tier throttles per model with no published limit, no rate-limit
+  // headers, and no quota endpoint, so the ceiling is measured. A single provider-level
+  // row is the correct shape here: every registered model was measured at the same
+  // ~15-20 req/min, and each model carries an independent budget, so a shared row never
+  // understates a model's own allowance. Sits below the observed ceiling on purpose.
+  nvidia: { requestsPerMinute: 15, source: "measured" },
 };
 
 // Mistral sets limits per model rather than per account, and the spread is wide:

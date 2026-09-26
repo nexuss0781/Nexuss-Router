@@ -76,6 +76,11 @@ import {
   normalizeMistralParams,
 } from "./mistral";
 import {
+  NVIDIA_BASE_URL,
+  NVIDIA_MODELS,
+  NVIDIA_PROVIDER_ID,
+} from "./nvidia";
+import {
   applyUpstreamRateLimitHeaders,
   consumeRateLimit,
   isRateLimitExhausted,
@@ -208,6 +213,19 @@ const BUILTIN_OPTIONAL_PROVIDERS: AiProvider[] = [
     priority: 985,
     models: MISTRAL_MODELS,
   },
+  {
+    // Free trial tier, no card and no purchased credits, so it outranks the metered
+    // routes. The measured ceiling is only ~15 req/min per model, which is the tightest
+    // budget in the stack, so it ranks below every other free provider and acts as a
+    // late fallback rather than a primary. It still earns the slot: it serves Nemotron 3
+    // Ultra first-party, the same model OpenRouter currently supplies at priority 970.
+    id: NVIDIA_PROVIDER_ID,
+    baseUrl: NVIDIA_BASE_URL,
+    apiKey: "",
+    format: "openai",
+    priority: 965,
+    models: NVIDIA_MODELS,
+  },
 ];
 
 const EXCLUDED_ORIGINAL_MODELS = new Set([
@@ -264,6 +282,12 @@ const BUILTIN_PROVIDER_ENV: BuiltinProviderEnv[] = [
     apiKeyNames: ["OMNIROUTE_MISTRAL_API_KEY", "MISTRAL_API_KEY"],
     baseUrlNames: ["OMNIROUTE_MISTRAL_BASE_URL", "MISTRAL_BASE_URL"],
     modelsNames: ["OMNIROUTE_MISTRAL_MODELS", "MISTRAL_MODELS"],
+  },
+  {
+    providerId: NVIDIA_PROVIDER_ID,
+    apiKeyNames: ["OMNIROUTE_NVIDIA_API_KEY", "NVIDIA_API_KEY", "NVIDIA_API_CATALOG_KEY", "NGC_API_KEY"],
+    baseUrlNames: ["OMNIROUTE_NVIDIA_BASE_URL", "NVIDIA_BASE_URL", "NVIDIA_API_BASE"],
+    modelsNames: ["OMNIROUTE_NVIDIA_MODELS", "NVIDIA_MODELS"],
   },
 ];
 
@@ -349,7 +373,16 @@ function selectProvider(providers: AiProvider[], model: string): AiProvider | nu
 function providerModel(model: string, provider: AiProvider): string {
   if (!model.startsWith("auto/") && model.includes("/")) {
     const prefix = model.split("/", 1)[0];
-    if (prefix === provider.id) return model.slice(prefix.length + 1);
+    // Some providers name their models with a path segment that collides with the
+    // provider id: every NVIDIA model begins "nvidia/". Stripping that segment would
+    // leave "nemotron-3-ultra-550b-a55b", which is not a model the provider serves.
+    // So a leading segment is only treated as a routing prefix when the remainder is
+    // itself a registered model id, which keeps "nvidia/nvidia/<model>" and the bare
+    // "nvidia/<model>" both correct.
+    if (prefix === provider.id) {
+      const stripped = model.slice(prefix.length + 1);
+      if (!provider.models.length || provider.models.includes(stripped)) return stripped;
+    }
   }
   return model.startsWith("auto") && provider.models.length ? provider.models[0] : model;
 }
