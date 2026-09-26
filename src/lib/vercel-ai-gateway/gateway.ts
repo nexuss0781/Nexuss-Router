@@ -60,6 +60,11 @@ import {
   type RouteProvider,
 } from "./routeHealth";
 import {
+  INCEPTION_BASE_URL,
+  INCEPTION_MODELS,
+  INCEPTION_PROVIDER_ID,
+} from "./inception";
+import {
   OPENROUTER_BASE_URL,
   OPENROUTER_MODELS,
   OPENROUTER_PROVIDER_ID,
@@ -176,6 +181,16 @@ const BUILTIN_OPTIONAL_PROVIDERS: AiProvider[] = [
     priority: 970,
     models: OPENROUTER_MODELS,
   },
+  {
+    // Paid, so it sits below every free route: auto spends free capacity first and
+    // only falls through to Inception when the free budgets are rate-limit spent.
+    id: INCEPTION_PROVIDER_ID,
+    baseUrl: INCEPTION_BASE_URL,
+    apiKey: "",
+    format: "openai",
+    priority: 975,
+    models: INCEPTION_MODELS,
+  },
 ];
 
 const EXCLUDED_ORIGINAL_MODELS = new Set([
@@ -220,6 +235,12 @@ const BUILTIN_PROVIDER_ENV: BuiltinProviderEnv[] = [
     apiKeyNames: ["OMNIROUTE_OPENROUTER_API_KEY", "OPENROUTER_API_KEY"],
     baseUrlNames: ["OMNIROUTE_OPENROUTER_BASE_URL", "OPENROUTER_BASE_URL"],
     modelsNames: ["OMNIROUTE_OPENROUTER_MODELS", "OPENROUTER_MODELS"],
+  },
+  {
+    providerId: INCEPTION_PROVIDER_ID,
+    apiKeyNames: ["OMNIROUTE_INCEPTION_API_KEY", "INCEPTION_API_KEY", "MERCURY_API_KEY"],
+    baseUrlNames: ["OMNIROUTE_INCEPTION_BASE_URL", "INCEPTION_BASE_URL"],
+    modelsNames: ["OMNIROUTE_INCEPTION_MODELS", "INCEPTION_MODELS"],
   },
 ];
 

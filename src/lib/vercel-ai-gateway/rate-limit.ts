@@ -15,6 +15,9 @@ export const PROVIDER_RATE_LIMITS: Record<string, RateLimit> = {
   "kilo-gateway": {},
   groq: { requestsPerMinute: 1000, tokensPerMinute: 8000, inputTokensPerMinute: 7000, source: "measured" },
   openrouter: { requestsPerMinute: 20, requestsPerDay: 50, source: "measured" },
+  // Inception returns no rate-limit headers and publishes no numeric ceiling, so
+  // there is nothing to enforce and the route is never skipped for budget.
+  inception: {},
 };
 
 type Window = { count: number; resetAt: number };

@@ -20,6 +20,8 @@ const MODEL_METADATA: Record<string, AiModelMetadata> = {
   "openrouter/poolside/laguna-xs-2.1:free": { family: "Laguna", modality: "text-chat", task_role: "code-chat", quality_tier: "aggregated-free", priority: "P3-aggregated", confidence: "low", taxonomy_source: "live-omniroute" },
   "openrouter/inclusionai/ling-3.0-flash-fin:free": { family: "Ling", modality: "text-chat", task_role: "finance-chat", quality_tier: "aggregated-free", priority: "P3-aggregated", confidence: "low", taxonomy_source: "live-omniroute" },
   "openrouter/nvidia/nemotron-3.5-content-safety:free": { family: "Nemotron Safety", modality: "text-chat", task_role: "safety-classifier", quality_tier: "aggregated-free", priority: "P3-aggregated", confidence: "low", taxonomy_source: "live-omniroute" },
+  "inception/mercury-2.5": { family: "Mercury", modality: "text-chat", task_role: "general-reasoning", quality_tier: "frontier-diffusion", priority: "P1-frontier", confidence: "medium", taxonomy_source: "live-omniroute" },
+  "inception/mercury-2": { family: "Mercury", modality: "text-chat", task_role: "general-reasoning", quality_tier: "frontier-diffusion", priority: "P1-frontier", confidence: "medium", taxonomy_source: "live-omniroute" },
 };
 
 export function getAiModelMetadata(id: string, provider: string): AiModelMetadata {

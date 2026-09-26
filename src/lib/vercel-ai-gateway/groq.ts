@@ -1,3 +1,5 @@
+import { INCEPTION_PROVIDER_ID, INCEPTION_TOKEN_FLOOR } from "./inception";
+
 export const GROQ_PROVIDER_ID = "groq";
 export const GROQ_BASE_URL = "https://api.groq.com/openai/v1";
 export const GROQ_CHAT_PATH = "chat/completions";
@@ -7,7 +9,7 @@ export const GROQ_GUARD_MAX_INPUT_CHARS = 1200;
 export const GROQ_GUARD_DEFAULT_THRESHOLD = 0.5;
 export const GROQ_GUARD_TIMEOUT_MS = 10_000;
 
-const NATIVE_TOOL_PROVIDER_PREFIXES = [GROQ_PROVIDER_ID];
+const NATIVE_TOOL_PROVIDER_PREFIXES = [GROQ_PROVIDER_ID, INCEPTION_PROVIDER_ID];
 
 export function supportsNativeToolCalls(model: string): boolean {
   const head = model.split("/", 1)[0];
@@ -18,10 +20,12 @@ export const GROQ_REASONING_TOKEN_FLOOR: Record<string, number> = {
   "openai/gpt-oss-120b": 1024,
 };
 
+// Upstream model names are provider-unique here, so one lookup covers both floors
+// without the caller having to know which provider it is routing to.
 export function minMaxTokensFor(model: string): number {
   const override = Number.parseInt(firstEnv("OMNIROUTE_GROQ_MIN_MAX_TOKENS"), 10);
   if (Number.isFinite(override) && override > 0) return override;
-  return GROQ_REASONING_TOKEN_FLOOR[model] ?? 0;
+  return GROQ_REASONING_TOKEN_FLOOR[model] ?? INCEPTION_TOKEN_FLOOR[model] ?? 0;
 }
 
 export function withMaxTokensFloor(body: Record<string, unknown>, model: string): { body: Record<string, unknown>; applied: number } {
