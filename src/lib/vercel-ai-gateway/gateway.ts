@@ -137,6 +137,26 @@ function constantTimeEqual(left: string, right: string): boolean {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
+// Master keys are a comma-separated list so a rotation does not have to be a hard
+// cutover: add the new key alongside the old one, move clients over, then drop the
+// old key. A single value behaves exactly as before. Compared against every entry
+// without an early return, so a match does not leak its position through timing.
+function masterKeys(): string[] {
+  const raw = process.env.OMNIROUTE_AI_API_KEY ?? "";
+  const seen = new Set<string>();
+  for (const entry of raw.split(",")) {
+    const key = entry.trim();
+    if (key) seen.add(key);
+  }
+  return [...seen];
+}
+
+function matchesMasterKey(supplied: string): boolean {
+  let matched = false;
+  for (const key of masterKeys()) matched = constantTimeEqual(supplied, key) || matched;
+  return matched;
+}
+
 function hashApiKey(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
@@ -467,8 +487,7 @@ async function authenticateGatewayRequest(
   const authorization = request.headers.get("authorization") || "";
   const match = /^Bearer\s+(.+)$/i.exec(authorization);
   const supplied = match?.[1].trim() || "";
-  const expected = process.env.OMNIROUTE_AI_API_KEY?.trim();
-  if (expected && supplied && constantTimeEqual(supplied, expected)) return { policy: null, response: null };
+    if (supplied && matchesMasterKey(supplied)) return { policy: null, response: null };
   if (!supplied) return { policy: null, response: errorResponse(401, "Invalid or missing API key", "invalid_api_key") };
 
   const policies = hasSupabaseGateway() ? await listHotPolicies() : await listApiKeyPolicies(dependencies);
@@ -540,7 +559,7 @@ export async function getAiGatewayHealth(dependencies: ParadRequestDependencies 
   const providers = await listProviders(dependencies);
   const uniqueProviders = providers.filter((provider, index, all) => all.findIndex((candidate) => candidate.id === provider.id) === index);
   const modelCount = uniqueProviders.reduce((total, provider) => total + provider.models.filter((id) => !isExcludedModel(provider.id, id)).length, 0);
-  const gatewayKey = Boolean(process.env.OMNIROUTE_AI_API_KEY?.trim());
+    const gatewayKey = masterKeys().length > 0;
   const providerCatalogOk = uniqueProviders.length > 0;
   // Supabase is an optimization. The gateway only considers itself DOWN when it
   // cannot serve with any source: configured-and-unreachable Supabase with no
