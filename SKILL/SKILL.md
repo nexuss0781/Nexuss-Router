@@ -1,290 +1,365 @@
 ---
 name: nexuss-ai-router
-description: Use a ready Nexuss AI Router deployment as the single AI inference endpoint. Apply when an agent receives an Nexuss AI Router domain or API base and needs to discover live models, choose Auto or an exact model, make chat, text, embedding, generation, media, search, or job requests, and return the result immediately.
+description: Use Nexuss AI Router (NAR) as the single AI inference endpoint, via the @nexuss0781/nar npm SDK or raw HTTP. Apply when an agent needs free LLM inference, model discovery, Auto routing, SSE streaming, or tool-calling loops, and when the task mentions nar-client, @nexuss0781/nar, OMNIROUTE_API_BASE, omniroute, x-omniroute-provider, or a Nexuss AI Router domain or API base.
 ---
 
 # Nexuss AI Router (NAR) — AI Inference
 
-Use the ready Nexuss AI Router deployment as one direct AI interface. The calling runtime already carries its gateway access. Begin inference immediately with the deployed endpoint supplied by the host.
+NAR is one endpoint in front of several free model providers. You send a normal
+OpenAI-shaped request; NAR picks a healthy free model, fails over to another when
+one is busy or rate-limited, and tells you which route served the call.
 
-## Start here
+**Prefer the SDK.** It handles model discovery, failover, SSE parsing, and tool-call
+assembly. Drop to raw HTTP only for the endpoints the SDK does not wrap
+(embeddings, images, audio, jobs, search).
 
-Accept either a deployed domain or an API base.
+## Decision rules
+
+Read this first, then act. Do not explore providers directly.
+
+| Situation | Do this |
+| --- | --- |
+| Any chat/completion request | Use the SDK. Never call a provider directly. |
+| User did not name a model | `model: "auto"` |
+| User named a model you have not seen this session | `await models()` first, then use that exact id |
+| Need one specific provider family | `model: "auto/<provider>"` |
+| Need the tool loop | `chat(prompt, { tools })`, read `r.finishReason` |
+| First token speed matters | `extra: { routing_class: "agent-fast" }` |
+| Slow provider startup is fine, quality matters | `extra: { routing_class: "quality" }` |
+| Embeddings, images, audio, search, jobs | Raw HTTP against the endpoint table below |
+| Report or audit which model answered | `r.route.provider`, `r.route.model` |
+| All routes busy | NAR returns 503 `provider_unavailable`; do not retry more than twice |
+
+## 1. Set up
+
+```bash
+npm install @nexuss0781/nar
+```
+
+Zero dependencies, Node 18+, Bun, Deno, Cloudflare Workers, Vercel Edge.
+
+```bash
+export NAR_BASE_URL="https://omniouter-vercel.vercel.app"   # optional, this is the default
+export NAR_API_KEY="<master key>"                          # required
+```
+
+`NAR_API_KEY` falls back to `OMNIROUTE_AI_API_KEY`. The client resolves, in order:
+`options.apiKey` → `NAR_API_KEY` → `OMNIROUTE_AI_API_KEY` → throws `NarError` 401
+`missing_api_key`. Never hardcode a key; always read the environment.
+
+For your own deployment, `NAR_BASE_URL` may be any host, with or without a trailing
+`/api/v1`. The client appends `/api/v1` when it is missing.
+
+## 2. The six calls
+
+| Call | Returns | Use for |
+| --- | --- | --- |
+| `stream(prompt, opts)` | `AsyncGenerator<string>` of text deltas | Showing text as it arrives |
+| `streamEvents(prompt, opts)` | `AsyncGenerator<StreamEvent>` | Streaming you also need tool calls from |
+| `chat(prompt, opts)` | `ChatResult` | The normal choice. Full text, no streaming |
+| `complete(prompt, opts)` | `ChatResult` | Same, but non-streaming HTTP and it includes `usage` |
+| `models(opts)` | `string[]` of live model ids | Before pinning, or to show what exists |
+| `health(opts)` | `{ status, ready, checks[] }` | Uptime checks, and diagnosing auth |
+
+Both `chat` and `complete` return:
+
+```ts
+type ChatResult = {
+  text: string;            // may be "" when the model called a tool
+  route: Route;            // who actually answered
+  toolCalls: ToolCall[];   // OpenAI request shape, [] when it answered with text
+  finishReason: string | null;   // "stop" | "tool_calls" | "length" | ...
+  usage: Usage | null;     // non-null from complete(), usually null from chat()
+  raw: unknown;            // full envelope, when you need more than these fields
+};
+```
+
+### Options
+
+| Option | Type | Notes |
+| --- | --- | --- |
+| `model` | `string` | `"auto"` by default. Pin with an exact live id. |
+| `system` | `string` | System prompt, placed ahead of the user turn |
+| `temperature`, `maxTokens` | `number` | Omitted from the request when unset |
+| `tools` | `unknown[]` | OpenAI tool definitions |
+| `toolChoice` | `"auto" \| "none" \| "required" \| object` | Omitted by default, which lets NAR auto-select |
+| `messages` | `Message[]` | Conversation so far. Becomes the request history; a non-empty `prompt` is then appended as a final user turn. Omit `prompt` entirely for a continuation turn |
+| `extra` | `object` | Merged into the body last, for anything not modelled |
+| `baseUrl`, `apiKey` | `string` | Override the environment for one call |
+| `signal` | `AbortSignal` | Cancellation and timeouts |
+
+## 3. Model selection
+
+```ts
+import { models } from "@nexuss0781/nar";
+
+const live = await models();   // 23 ids like "puter/gemma-4-26b-a4b-it"
+```
+
+Always resolve against this list before pinning. A pinned id that is not live returns
+503, it does not silently fall back to something else.
 
 ```text
-https://your-omniroute-deployment.example
-https://your-omniroute-deployment.example/api/v1
+catalog = await models()
+
+if user named a model id and it is in catalog -> use it exactly
+else if user named a provider                  -> "auto/<provider>"
+else                                          -> "auto"
 ```
 
-Normalize the input into `OMNIROUTE_API_BASE`:
+`auto` is the default and the right answer unless you have a reason. NAR keeps a
+tool-calling conversation pinned to the model that started it, so `auto` will not
+change models mid-loop.
 
-```text
-If the supplied endpoint ends with /api/v1, use it as-is.
-Otherwise append /api/v1.
-```
+### Routing classes
 
-Use the host's ready gateway client for every request. Send all paths below relative to `OMNIROUTE_API_BASE`.
-
-## Standard inference workflow
-
-1. Request `GET /models`.
-2. Read `data[].id` as the live model list.
-3. Use `model: "auto"` for automatic selection, or use an exact live model ID for a chosen model.
-4. Send the user task to the matching inference endpoint.
-5. Read `choices[0].message.content` for chat-style responses.
-6. Return the completed result and the selected model when useful.
-
-## Choose a model
-
-### Automatic selection
-
-Use Auto for the normal default. Nexuss AI Router selects a currently eligible route and performs its internal fallback sequence.
-
-```json
-{
-  "model": "auto",
-  "messages": [
-    {"role": "user", "content": "Explain the idea in three sentences."}
-  ]
-}
-```
-
-Use provider-focused Auto when the task needs one live provider family:
-
-```json
-{
-  "model": "auto/opencode-zen",
-  "messages": [
-    {"role": "user", "content": "Write a concise TypeScript function."}
-  ]
-}
-```
-
-### New low-latency routing classes
-
-Use the standard `POST /chat/completions` endpoint with an optional `routing_class` field:
+Pass through `extra`; they are NAR fields, not SDK fields.
 
 | Class | Use when | Behavior |
 | --- | --- | --- |
-| `agent-fast` | Earliest possible first token matters | Starts with a 3-second provider deadline, then escalates to balanced and quality candidates when a route times out or fails |
-| `agent-balanced` | The agent needs more provider startup time | Starts with an 8-second deadline, then escalates to quality candidates |
-| `quality` | Quality and completion reliability matter more than first-token speed | Uses the general provider deadline and quality-oriented fallback candidates |
-| `auto` | Compatibility behavior is preferred | Automatic requests also progress through fast, balanced, and quality phases |
+| `agent-fast` | First token latency dominates | 3s provider deadline, then escalates |
+| `agent-balanced` | Provider startup is slow | 8s deadline, then escalates |
+| `quality` | Completeness beats latency | General deadline, quality-first fallback |
+| `auto` | Default behavior | Progresses through fast, balanced, quality |
 
-Example:
+```ts
+await chat("Summarise this", { extra: { routing_class: "agent-fast" } });
+```
 
-```json
-{
-  "model": "auto",
-  "routing_class": "agent-fast",
-  "stream": true,
-  "messages": [{"role": "user", "content": "Give a concise deployment checklist."}]
+A timeout, 408, 429, auth failure, payment failure, or 5xx advances to the next phase
+instead of surfacing an error. You get an error only after every eligible candidate
+has failed.
+
+### Latency reality check
+
+Free providers vary a lot. A 3-second deadline fails over fast, but the last-resort
+route can take 30–50s on a cold call. If a task is latency sensitive, set
+`maxTokens` and use `agent-fast`, and do not assume a quick first token. NAR
+synthesises the SSE stream for slower providers, so deltas can arrive in one burst
+rather than token by token — that is normal, not a bug.
+
+## 4. Tool calls
+
+Tool calls come back in OpenAI request shape, ready to hand to your runtime. The
+access is identical on `chat`, `complete`, and `streamEvents`.
+
+```ts
+const tools = [{
+  type: "function",
+  function: {
+    name: "get_weather",
+    description: "Current weather for a city",
+    parameters: {
+      type: "object",
+      properties: { city: { type: "string" } },
+      required: ["city"],
+    },
+  },
+}];
+
+const r = await chat("What is the weather in Oslo?", { tools, toolChoice: "auto" });
+
+if (r.finishReason === "tool_calls") {
+  for (const call of r.toolCalls) {
+    const args = JSON.parse(call.function.arguments);   // arguments is a JSON string
+    run(call.function.name, args);
+  }
 }
 ```
 
-Use `routing_class: "agent-balanced"` for requests that should tolerate a slower provider startup, and `routing_class: "quality"` for detailed or quality-sensitive requests. A retryable timeout, HTTP 408, HTTP 429, authorization failure, payment failure, or HTTP 5xx causes the gateway to continue to the next phase instead of immediately returning an error. An error is returned only after eligible candidates are exhausted.
+`arguments` is always a string and must be parsed. A malformed payload is defaulted
+to `"{}"` rather than throwing.
 
-Routing classes also work with provider-scoped Auto, for example `model: "auto/kilo-gateway"`. Exact model IDs remain exact and do not switch to unrelated models, although the selected routing class still controls the provider deadline.
+### Full loop
 
-Successful responses expose `x-omniroute-provider`, `x-omniroute-model`, and `x-omniroute-routing-class` headers. The last header reports the phase that completed the request: `fast`, `balanced`, or `quality`.
+```ts
+const messages = [{ role: "user", content: "Weather in Oslo, then summarise it." }];
 
-The gateway keeps provider and policy data in a short-lived server-side warm cache. It does not synchronously discover provider `/models` during chat handling. Use `GET /models` to inspect the gateway catalog when selecting a model; the catalog includes family, modality, task role, quality tier, priority, confidence, and capability metadata where available.
+for (let turn = 0; turn < 6; turn++) {
+  const r = await chat("", { messages, tools, toolChoice: "auto" });
 
-### Exact model selection
+  if (r.finishReason !== "tool_calls") {
+    console.log(r.text);
+    break;
+  }
 
-Request the live catalog first, then pass one exact `data[].id` value unchanged.
+  messages.push({ role: "assistant", content: r.text, tool_calls: r.toolCalls });
 
-```json
-{
-  "model": "opencode-zen/nemotron-3-ultra-free",
-  "messages": [
-    {"role": "user", "content": "Summarize this design brief."}
-  ],
-  "temperature": 0.4,
-  "max_tokens": 800
+  for (const call of r.toolCalls) {
+    const result = await runTool(call.function.name, JSON.parse(call.function.arguments));
+    messages.push({
+      role: "tool",
+      tool_call_id: call.id,
+      content: typeof result === "string" ? result : JSON.stringify(result),
+    });
+  }
 }
 ```
 
-Use catalog metadata to match a task to a model:
+Always echo the `assistant` message with its `tool_calls` and one `tool` message per
+call, keyed by `tool_call_id`. A loop that skips this will not progress.
 
-| Catalog field | Use it for |
-| --- | --- |
-| `id` | Exact model request value. |
-| `family` | Model family preference. |
-| `modality` | Text, image, audio, video, embeddings, or other task type. |
-| `task_role` | Chat, code, reasoning, generation, search, or safety task. |
-| `quality_tier` | Relative catalog tier. |
-| `priority` | Gateway preference order. |
-| `confidence` | Catalog classification confidence. |
+### Streaming with tools
 
-Use this selection pattern:
-
-```text
-catalog = GET /models
-models = catalog.data
-
-if the user selected a model ID from models:
-  use that exact ID
-else if the user selected a provider:
-  use auto/<provider>
-else:
-  use auto
-```
-
-## Chat inference
-
-Send OpenAI-compatible chat payloads to `POST /chat/completions`.
-
-```json
-{
-  "model": "auto",
-  "messages": [
-    {"role": "system", "content": "You are a precise writing assistant."},
-    {"role": "user", "content": "Draft a short product announcement."}
-  ],
-  "temperature": 0.7,
-  "max_tokens": 800
+```ts
+for await (const e of streamEvents(prompt, { tools })) {
+  for (const call of e.toolCalls) {
+    console.log(call.function.name, call.function.arguments);
+  }
 }
 ```
 
-Read the result:
+Argument fragments arriving split across chunks are already rejoined. Each event
+carries a snapshot, so an event you keep does not change later.
 
-```text
-reply = response.choices[0].message.content
-selected_model = response.model
-```
+### Small-model warning
 
-For streaming chat, include `"stream": true` and process the returned event stream in order.
+Free models are 1B–30B. They reliably emit valid calls but misread the request:
+ask about Oslo and a call may arrive for San Francisco. Check the parsed arguments
+before executing anything irreversible. Do not trust small-model tool arguments
+without validation.
 
-```json
-{
-  "model": "auto",
-  "stream": true,
-  "messages": [
-    {"role": "user", "content": "Write a short welcome message."}
-  ]
+## 5. Errors
+
+Every failure throws `NarError`:
+
+```ts
+import { NarError } from "@nexuss0781/nar";
+
+try {
+  await chat("hi");
+} catch (e) {
+  if (e instanceof NarError) {
+    e.status;        // 401, 429, 503, ...
+    e.code;          // "invalid_api_key", "provider_unavailable", ...
+    e.route;         // Route, with attemptTrail when every route failed
+    e.body;          // raw envelope
+  }
+  throw e;
 }
 ```
 
-## Live model discovery
+| Status | Code | Meaning | Do |
+| --- | --- | --- | --- |
+| 401 | `invalid_api_key` | Bad or missing key | Fix the key. Retrying will not help |
+| 401 | `missing_api_key` | No key in the environment | Set `NAR_API_KEY` |
+| 403 | `model_not_allowed` | Key is scoped away from that model | Use an allowed model |
+| 429 | `rate_limited` | Gateway rate limit | Back off, then retry |
+| 503 | `provider_unavailable` | Every candidate failed | Retry once or twice, then report |
+| 503 | `model_not_found` | Pinned id is not live | Re-read `models()` |
 
-Call `GET /models` whenever starting a new AI task, selecting a specialized model, or refreshing the available inventory.
+NAR already retried and failed over internally. A 503 means the whole free pool was
+unavailable at that moment, so wrap it in your own short backoff and never loop
+forever.
 
-```text
-GET {OMNIROUTE_API_BASE}/models
+## 6. Which model answered
+
+```ts
+const r = await chat("hello");
+r.route.provider   // "puter"
+r.route.model      // "puter/infron:qwen/qwen3.8-27b:free"
 ```
 
-The response is an OpenAI-style list:
+Read from the `x-omniroute-provider` / `x-omniroute-model` response headers. Log it
+when you report results, and treat `route.provider` differing from what you pinned as
+a signal worth surfacing. `route.attemptTrail` is populated only when the request
+failed everywhere.
 
-```json
-{
-  "object": "list",
-  "data": [
-    {
-      "id": "provider/model-id",
-      "object": "model",
-      "owned_by": "provider"
-    }
-  ]
-}
+## 7. Health
+
+```ts
+const h = await health();
+// { status: "ok", ready: true, checks: [{ name, status, detail }] }
 ```
 
-Treat this live response as the model source for the current task. Use its model IDs directly in the following request.
+Unauthenticated, so it is safe for uptime monitoring. It reports per-provider auth
+state, which is the fastest way to tell "NAR is down" from "one provider's token
+expired".
 
-## Complete endpoint directory
+## 8. Raw HTTP, for what the SDK does not wrap
 
-Use provider-compatible request bodies for the chosen endpoint. Use `model` where the endpoint accepts a model selection.
+The SDK covers chat only. Everything else is a normal OpenAI-compatible call.
 
-| Purpose | Method and path | Typical payload form |
+```ts
+const base = `${process.env.NAR_BASE_URL}/api/v1`;
+await fetch(`${base}/embeddings`, {
+  method: "POST",
+  headers: {
+    "content-type": "application/json",
+    authorization: `Bearer ${process.env.NAR_API_KEY}`,
+  },
+  body: JSON.stringify({ model: "<live embedding model id>", input: ["first", "second"] }),
+});
+```
+
+If the base already ends in `/api/v1`, do not append it twice.
+
+| Purpose | Method and path | Payload |
 | --- | --- | --- |
-| Discover models | `GET /models` | No body. |
-| Chat completions | `POST /chat/completions` | OpenAI chat `messages`, `model`, generation options. |
-| Text completions | `POST /completions` | `prompt`, `model`, generation options. |
-| Responses API | `POST /responses` | Responses API `input`, `model`, tools, output options. |
-| Chat-compatible API | `POST /api/chat` | Chat-style JSON body. |
-| Messages API | `POST /messages` | Message-style JSON body. |
-| Embeddings | `POST /embeddings` | `input`, `model`, encoding options. |
-| Reranking | `POST /rerank` | Query, documents, selected model. |
-| Classification | `POST /classify` | Input and classification options. |
-| Moderation | `POST /moderations` | Input and moderation model when selected. |
-| Image generation | `POST /images/generations` | Prompt, `model`, size, quality, response options. |
-| Image edits | `POST /images/edits` | Multipart image and prompt fields. |
-| Image upscale | `POST /images/upscale` | Multipart image and model fields. |
-| Speech synthesis | `POST /audio/speech` | Input text, voice, format, `model`. |
-| Audio transcription | `POST /audio/transcriptions` | Multipart audio file, `model`, transcription options. |
-| Audio translation | `POST /audio/translations` | Multipart audio file, `model`, translation options. |
-| OCR | `POST /ocr` | JSON document or image reference and extraction options. |
-| Segmentation | `POST /segment` | JSON media reference and segmentation options. |
-| Search | `POST /search` | JSON query and search options. |
-| Web fetch | `POST /web/fetch` | JSON URL and fetch options. |
-| Music generation | `POST /music/generations` | Generation request; receive a job record. |
-| Video generation | `POST /videos/generations` | Generation request; receive a job record. |
-| Create generic job | `POST /jobs` | JSON job request. |
-| List jobs | `GET /jobs` | No body. |
-| Read job | `GET /jobs/{id}` | No body. |
-| Cancel job | `POST /jobs/{id}/cancel` | Optional JSON body. |
-| Retry job | `POST /jobs/{id}/retry` | Optional JSON body. |
-| Complete job | `POST /jobs/{id}/complete` | JSON completion payload. |
-| Upload file | `POST /files` | Multipart file fields. |
-| List files | `GET /files` | No body. |
-| Read file metadata | `GET /files/{id}` | No body. |
-| Read file content | `GET /files/{id}/content` | No body. |
-| Delete file | `DELETE /files/{id}` | No body. |
-| Provider chat route | `POST /providers/{provider}/chat/completions` | Chat payload for a named provider route. |
-| Provider embeddings route | `POST /providers/{provider}/embeddings` | Embeddings payload for a named provider route. |
-| Provider image route | `POST /providers/{provider}/images/generations` | Image-generation payload for a named provider route. |
-| Versioned model route | `GET /v1beta/models/{path}` | Versioned model lookup path. |
+| Discover models | `GET /models` | none |
+| Chat completions | `POST /chat/completions` | `messages`, `model`, options |
+| Text completions | `POST /completions` | `prompt`, `model` |
+| Responses API | `POST /responses` | `input`, `model`, tools |
+| Chat-compatible | `POST /api/chat` | chat-style body |
+| Messages API | `POST /messages` | message-style body |
+| Embeddings | `POST /embeddings` | `input`, `model` |
+| Reranking | `POST /rerank` | `query`, `documents`, `model` |
+| Classification | `POST /classify` | input, options |
+| Moderation | `POST /moderations` | `input`, optional `model` |
+| Image generation | `POST /images/generations` | `prompt`, `size`, options |
+| Image edits | `POST /images/edits` | multipart |
+| Image upscale | `POST /images/upscale` | multipart |
+| Speech synthesis | `POST /audio/speech` | `input`, `voice`, `model` |
+| Transcription | `POST /audio/transcriptions` | multipart |
+| Translation | `POST /audio/translations` | multipart |
+| OCR | `POST /ocr` | document or image reference |
+| Segmentation | `POST /segment` | media reference |
+| Search | `POST /search` | `query` |
+| Web fetch | `POST /web/fetch` | `url` |
+| Music generation | `POST /music/generations` | returns a job |
+| Video generation | `POST /videos/generations` | returns a job |
+| Create job | `POST /jobs` | JSON |
+| List jobs | `GET /jobs` | none |
+| Read job | `GET /jobs/{id}` | none |
+| Cancel / retry / complete job | `POST /jobs/{id}/cancel`, `/retry`, `/complete` | optional JSON |
+| Files | `POST /files`, `GET /files`, `GET /files/{id}`, `GET /files/{id}/content`, `DELETE /files/{id}` | multipart or none |
+| Provider-scoped chat | `POST /providers/{provider}/chat/completions` | chat body |
+| Provider-scoped embeddings | `POST /providers/{provider}/embeddings` | embeddings body |
+| Provider-scoped images | `POST /providers/{provider}/images/generations` | image body |
 
-## Inference patterns
-
-### Text task
+### Long-running jobs
 
 ```text
-1. GET /models
-2. Choose auto or an exact text-capable ID
-3. POST /chat/completions
-4. Return choices[0].message.content
+1. POST /music/generations or /videos/generations
+2. Save the returned job id
+3. GET /jobs/{id} until it reports a completed result
+4. Return the asset reference
 ```
 
-### Embedding task
+## 9. Rotating the master key
 
-```json
-{
-  "model": "<live embedding model id>",
-  "input": ["first text", "second text"]
-}
-```
-
-Send this body to `POST /embeddings`. Read the returned embedding vectors from `data`.
-
-### Image task
-
-```json
-{
-  "model": "<live image model id>",
-  "prompt": "An editorial copper-and-obsidian product still life",
-  "size": "1024x1024"
-}
-```
-
-Send this body to `POST /images/generations`. Read the generated image result from the returned response.
-
-### Long-running generation task
+`OMNIROUTE_AI_API_KEY` accepts a comma-separated list, so rotation needs no downtime:
 
 ```text
-1. POST /music/generations or POST /videos/generations.
-2. Save the returned job id.
-3. GET /jobs/{id} until the job reports its completed result.
-4. Return the generated asset reference to the user.
+1. Set the variable to "<old key>,<new key>", redeploy. Both work.
+2. Move clients to the new key.
+3. Remove the old key from the list, redeploy.
 ```
 
-## Agent behavior
+Never shorten this to a single atomic swap; every client on the old value gets 401 at
+once.
 
-Begin with live model discovery, then perform the inference request directly. Keep the user’s prompt, message history, tools, response format, streaming choice, temperature, and output limit intact. State the selected model when it helps the user understand the result.
+## Rules for agents
 
-Use a compact completion report:
-
-```text
-Model: <auto-selected or exact live model>
-Result: <useful completed output>
-```
+- Do not call a provider directly, and do not hand-write `curl` for chat. Go through
+  NAR, so failover keeps working.
+- Pin a model only when the user asked for one, and verify it against `models()`
+  first. Otherwise use `auto`.
+- Validate tool arguments before acting. The models are small and get the arguments wrong.
+- Echo `tool_calls` and the `tool` results back into `messages`, or the loop stalls.
+- On 503, back off and retry at most twice, then report. Do not spin.
+- Report the serving route when it is informative: `r.route.provider` and `r.route.model`.
+- Keep the caller's prompt, history, tools, and output limits intact. Do not silently
+  truncate a request to make it succeed.
+- Say which model answered and note when fallback changed the provider from the one
+  requested.
