@@ -47,18 +47,34 @@ export type ChatResult = {
   route: Route;
   /** Token usage, when the upstream reported it. Streaming responses usually omit it. */
   usage: Usage | null;
+  /**
+   * Tool calls the model asked for, in OpenAI request shape. Empty when it answered with
+   * text. Read `finishReason` for "tool_calls" versus "stop".
+   */
+  toolCalls: ToolCall[];
+  finishReason: string | null;
   /** Raw response envelope, for callers that need more than text. */
   raw: unknown;
 };
 
-export type StreamEvent = {
-  /** Incremental text. Empty on role-only or tool-call-only chunks. */
-  delta: string;
-  /** Accumulated tool calls so far, keyed by index. */
-  toolCalls: Record<number, { id?: string; name?: string; arguments: string }>;
-  finishReason: string | null;
-  route: Route;
-};
+  export type ToolCall = {
+    id?: string;
+    type: "function";
+    function: { name: string; arguments: string };
+  };
+
+  export type StreamEvent = {
+    /** Incremental text. Empty on role-only or tool-call-only chunks. */
+    delta: string;
+    /**
+     * Tool calls accumulated so far, in OpenAI request shape and ready to pass straight
+     * back as the `tool_calls` of an assistant message. A snapshot taken at this chunk,
+     * so it can be stored without it changing underneath the caller.
+     */
+    toolCalls: ToolCall[];
+    finishReason: string | null;
+    route: Route;
+  };
 
 export class NarError extends Error {
   readonly status: number;
@@ -157,20 +173,53 @@ function mergeToolCalls(
   return into;
 }
 
-function parseChunk(payload: string, route: Route, toolCalls: Record<number, { id?: string; name?: string; arguments: string }>): StreamEvent {
+  type ToolCallAccumulator = Record<number, { id?: string; name?: string; arguments: string }>;
+
+  /** Flatten the index-keyed accumulator into OpenAI `tool_calls` order. */
+  function toToolCalls(into: ToolCallAccumulator): ToolCall[] {
+    return Object.keys(into)
+      .map(Number)
+      .sort((a, b) => a - b)
+      .map((index) => {
+        const entry = into[index]!;
+        return {
+          id: entry.id,
+          type: "function" as const,
+          function: { name: entry.name ?? "", arguments: entry.arguments || "{}" },
+        };
+      });
+  }
+
+  /** Read `tool_calls` off a non-streaming OpenAI envelope. */
+  function toolCallsFromMessage(message: Record<string, any> | undefined): ToolCall[] {
+    const calls = message?.tool_calls;
+    if (!Array.isArray(calls)) return [];
+    return calls
+      .filter((call) => call && typeof call === "object")
+      .map((call) => ({
+        id: typeof call.id === "string" ? call.id : undefined,
+        type: "function" as const,
+        function: {
+          name: typeof call.function?.name === "string" ? call.function.name : "",
+          arguments: typeof call.function?.arguments === "string" ? call.function.arguments : "{}",
+        },
+      }));
+  }
+
+  function parseChunk(payload: string, route: Route, toolCalls: ToolCallAccumulator): StreamEvent {
   try {
     const parsed = JSON.parse(payload) as Record<string, any>;
     const choice = parsed?.choices?.[0] ?? {};
     const delta = choice.delta ?? {};
     mergeToolCalls(toolCalls, delta.tool_calls);
     return {
-      delta: typeof delta.content === "string" ? delta.content : "",
-      toolCalls,
+        delta: typeof delta.content === "string" ? delta.content : "",
+        toolCalls: toToolCalls(toolCalls),
       finishReason: typeof choice.finish_reason === "string" ? choice.finish_reason : null,
       route,
     };
   } catch {
-    return { delta: "", toolCalls, finishReason: null, route };
+      return { delta: "", toolCalls: toToolCalls(toolCalls), finishReason: null, route };
   }
 }
 
@@ -240,12 +289,16 @@ export async function* streamEvents(prompt: string, options: ChatOptions = {}): 
 /** Collect a full streamed answer. Convenient when streaming is not needed downstream. */
 export async function chat(prompt: string, options: ChatOptions = {}): Promise<ChatResult> {
   let text = "";
-  let route: Route = { provider: null, model: null, attemptTrail: null };
-  for await (const event of streamEvents(prompt, options)) {
-    text += event.delta;
-    route = event.route;
-  }
-  return { text, route, usage: null, raw: null };
+    let route: Route = { provider: null, model: null, attemptTrail: null };
+    let toolCalls: ToolCall[] = [];
+    let finishReason: string | null = null;
+    for await (const event of streamEvents(prompt, options)) {
+      text += event.delta;
+      route = event.route;
+      if (event.toolCalls.length) toolCalls = event.toolCalls;
+      if (event.finishReason) finishReason = event.finishReason;
+    }
+    return { text, route, toolCalls, finishReason, usage: null, raw: null };
 }
 
 /** One non-streaming request, returning the parsed OpenAI-shaped envelope. */
@@ -263,12 +316,15 @@ export async function complete(prompt: string, options: ChatOptions = {}): Promi
   const route = routeFrom(response.headers);
   if (!response.ok) throw await readError(response, route);
 
-  const body = (await response.json()) as Record<string, any>;
-  return {
-    text: body?.choices?.[0]?.message?.content ?? "",
-    route,
-    usage: body?.usage ?? null,
-    raw: body,
+    const body = (await response.json()) as Record<string, any>;
+    const message = body?.choices?.[0]?.message;
+    return {
+      text: message?.content ?? "",
+      route,
+      toolCalls: toolCallsFromMessage(message),
+      finishReason: typeof body?.choices?.[0]?.finish_reason === "string" ? body.choices[0].finish_reason : null,
+      usage: body?.usage ?? null,
+      raw: body,
   };
 }
 
@@ -292,7 +348,8 @@ export type HealthReport = {
 
 /** Router health, including per-provider auth state. Useful for uptime checks. */
 export async function health(options: { baseUrl?: string; signal?: AbortSignal } = {}): Promise<HealthReport> {
-  const response = await fetch(`${envBase().replace(/\/+$/, "")}/api/v1/health`, { signal: options.signal });
+    const healthBase = (options.baseUrl || envBase()).replace(/\/+$/, "");
+    const response = await fetch(`${healthBase}/api/v1/health`, { signal: options.signal });
   return (await response.json()) as HealthReport;
 }
 
