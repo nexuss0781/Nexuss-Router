@@ -7,8 +7,10 @@
 // The model ids are Puter's own, which are provider-qualified and colon-separated
 // ("infron:qwen/qwen3.8-27b:free"). They are stored bare and qualified as
 // "puter/<id>" in NAR, so the slash inside the id never reaches the routing prefix.
+import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
+import vm from "node:vm";
 
 export const PUTER_PROVIDER_ID = "puter";
 export const PUTER_API_ORIGIN = "https://api.puter.com";
@@ -94,7 +96,14 @@ function getInstance(token: string): PuterInstance {
 type PuterInit = { init: (token: string) => unknown };
 
 function loadInit(): PuterInit {
-  const entry = "@heyputer/puter.js/src/init.cjs";
+  // init() is reimplemented here rather than required from init.cjs, because init.cjs
+  // finds its bundle with resolve(__filename, '..') + '/../dist'. Under a bundler
+  // __filename is the emitted chunk, so that lookup misses and the SDK reports
+  // "run npm run build in src/puter-js first" - misleading, since the bundle ships in the
+  // npm package. Resolving dist/puter.cjs by package path relies on the
+  // outputFileTracingIncludes entry in next.config.mjs instead, which is verifiable in
+  // the route's .nft.json.
+  const entry = "@heyputer/puter.js/dist/puter.cjs";
   // Only createRequire is used here. A bare require.resolve is whatever the bundler
   // leaves in scope, which is not Node's require and does not honour the paths option.
   const anchors = [join(process.cwd(), "package.json"), import.meta.url];
@@ -102,15 +111,37 @@ function loadInit(): PuterInit {
   for (const anchor of anchors) {
     try {
       const requireFrom = createRequire(anchor);
-      const resolved = requireFrom.resolve(entry);
-      const loaded = requireFrom(resolved) as PuterInit;
-      if (typeof loaded?.init === "function") return loaded;
-      failures.push(`${resolved} did not export init()`);
+      const bundlePath = requireFrom.resolve(entry);
+      const code = readFileSync(bundlePath, "utf8");
+      return { init: (token: string) => evaluatePuterBundle(code, token) };
     } catch (error) {
       failures.push(describePuterError(error));
     }
   }
   throw new Error(`Unable to load @heyputer/puter.js: ${failures.join(" | ").slice(0, 300)}`);
+}
+
+// Mirrors init.cjs: hand the browser bundle a vm context seeded with the host globals,
+// because it is written to run against window/document rather than a server.
+function evaluatePuterBundle(code: string, token: string): unknown {
+  const goodContext: Record<string, unknown> = {
+    PUTER_API_ORIGIN: globalThis.PUTER_API_ORIGIN,
+    PUTER_ORIGIN: globalThis.PUTER_ORIGIN,
+  };
+  for (const name of Object.getOwnPropertyNames(globalThis)) {
+    try {
+      goodContext[name] = (globalThis as unknown as Record<string, unknown>)[name];
+    } catch {
+      continue;
+    }
+  }
+  goodContext.globalThis = goodContext;
+  const context = vm.createContext(goodContext);
+  vm.runInNewContext(code, context);
+  const puter = goodContext.puter as { setAuthToken?: (value: string) => void } | undefined;
+  if (!puter?.setAuthToken) throw new Error("@heyputer/puter.js bundle did not expose puter.setAuthToken");
+  puter.setAuthToken(token);
+  return puter;
 }
 
 function toChatMessages(body: Record<string, unknown>): unknown {
