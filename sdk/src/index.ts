@@ -18,6 +18,12 @@ export type ChatOptions = {
   maxTokens?: number;
   /** OpenAI-style tool definitions, for tool-calling loops. */
   tools?: unknown[];
+  /**
+   * How the model may use `tools`. Defaults to the server's own default (auto) when
+   * omitted, which is almost always what you want. Pass "none" to force a text answer
+   * even though tools are available, or "required" to demand a call.
+   */
+  toolChoice?: "auto" | "none" | "required" | Record<string, unknown>;
   /** Abort the request. */
   signal?: AbortSignal;
   /** Override the deployment for this call only. */
@@ -139,6 +145,7 @@ function buildBody(prompt: string, options: ChatOptions, stream: boolean): Recor
     ...(options.temperature === undefined ? {} : { temperature: options.temperature }),
     ...(options.maxTokens === undefined ? {} : { max_tokens: options.maxTokens }),
     ...(options.tools ? { tools: options.tools } : {}),
+    ...(options.toolChoice === undefined ? {} : { tool_choice: options.toolChoice }),
     ...(stream ? { stream: true } : {}),
     ...(options.extra ?? {}),
   };
