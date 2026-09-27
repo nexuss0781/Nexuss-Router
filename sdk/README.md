@@ -67,12 +67,13 @@ console.log(await models());
 
 ## Tool calling
 
-Tool call deltas are accumulated for you and arrive keyed by index.
+Tool calls come back in OpenAI request shape, ready to hand straight to your runtime.
+`toolCalls` and `finishReason` are populated by `chat`, `complete` and `streamEvents` alike.
 
 ```ts
-import { streamEvents, complete } from "@nexuss0781/nar";
+import { chat } from "@nexuss0781/nar";
 
-for await (const event of streamEvents("What is the weather in Oslo?", {
+const r = await chat("What is the weather in Oslo?", {
   tools: [{
     type: "function",
     function: {
@@ -85,11 +86,34 @@ for await (const event of streamEvents("What is the weather in Oslo?", {
       },
     },
   }],
-})) {
-  for (const call of Object.values(event.toolCalls)) {
-    if (call.name && !event.delta) console.log(call.name, call.arguments);
+  toolChoice: "auto",
+});
+
+if (r.finishReason === "tool_calls") {
+  for (const call of r.toolCalls) {
+    run(call.function.name, JSON.parse(call.function.arguments));
   }
 }
+```
+
+Streaming reassembles argument fragments for you. Each event carries a snapshot of the
+calls accumulated so far, so an event you keep does not change underneath you:
+
+```ts
+import { streamEvents } from "@nexuss0781/nar";
+
+for await (const event of streamEvents(prompt, { tools })) {
+  for (const call of event.toolCalls) {
+    console.log(call.function.name, call.function.arguments);
+  }
+}
+```
+
+Feeding the result back for the next turn:
+
+```ts
+messages.push({ role: "assistant", content: r.text, tool_calls: r.toolCalls });
+messages.push({ role: "tool", tool_call_id: r.toolCalls[0].id, content: "12C and clear" });
 ```
 
 NAR keeps a tool-calling conversation pinned to the model that started it, so a
