@@ -95,20 +95,19 @@ type PuterInit = { init: (token: string) => unknown };
 
 function loadInit(): PuterInit {
   const entry = "@heyputer/puter.js/src/init.cjs";
-  const attempts: Array<() => string> = [
-    () => require.resolve(entry, { paths: [process.cwd()] }),
-    () => createRequire(import.meta.url).resolve(entry),
-    () => createRequire(join(process.cwd(), "package.json")).resolve(entry),
-  ];
+  // Only createRequire is used here. A bare require.resolve is whatever the bundler
+  // leaves in scope, which is not Node's require and does not honour the paths option.
+  const anchors = [join(process.cwd(), "package.json"), import.meta.url];
   const failures: string[] = [];
-  for (const attempt of attempts) {
+  for (const anchor of anchors) {
     try {
-      const resolved = attempt();
-      const loaded = createRequire(resolved)(resolved) as PuterInit;
+      const requireFrom = createRequire(anchor);
+      const resolved = requireFrom.resolve(entry);
+      const loaded = requireFrom(resolved) as PuterInit;
       if (typeof loaded?.init === "function") return loaded;
       failures.push(`${resolved} did not export init()`);
     } catch (error) {
-      failures.push(`${describePuterError(error)}`);
+      failures.push(describePuterError(error));
     }
   }
   throw new Error(`Unable to load @heyputer/puter.js: ${failures.join(" | ").slice(0, 300)}`);
