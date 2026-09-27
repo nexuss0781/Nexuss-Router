@@ -1,6 +1,6 @@
 {
   "name": "@nexuss0781/nar",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Minimal client for Nexuss AI Router: auto-routed free LLMs, SSE streaming, one master key, no provider handling.",
   "keywords": [
     "llm",
