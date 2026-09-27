@@ -19,6 +19,13 @@ export type ChatOptions = {
   /** OpenAI-style tool definitions, for tool-calling loops. */
   tools?: unknown[];
   /**
+   * Full conversation so far, for multi-turn and tool loops. Takes precedence over
+   * `prompt`: the messages are sent as the history, and a non-empty `prompt` is
+   * appended as a final user turn. Without this every call is stateless and the model
+   * loses all earlier context.
+   */
+  messages?: unknown[];
+  /**
    * How the model may use `tools`. Defaults to the server's own default (auto) when
    * omitted, which is almost always what you want. Pass "none" to force a text answer
    * even though tools are available, or "required" to demand a call.
@@ -131,14 +138,19 @@ function routeFrom(headers: Headers): Route {
   };
 }
 
-function buildMessages(prompt: string, options: ChatOptions): unknown[] {
-  const messages: unknown[] = [];
-  if (options.system) messages.push({ role: "system", content: options.system });
-  messages.push({ role: "user", content: prompt });
+function buildMessages(prompt: string | undefined, options: ChatOptions): unknown[] {
+  const messages: unknown[] = Array.isArray(options.messages) ? [...options.messages] : [];
+  // Prepend the system prompt unless the caller already opened with one, so passing
+  // both does not produce two system turns in a row.
+  if (options.system && !(messages[0] as { role?: string } | undefined)?.role?.startsWith("system")) {
+    messages.unshift({ role: "system", content: options.system });
+  }
+  if (typeof prompt === "string" && prompt !== "") messages.push({ role: "user", content: prompt });
+  if (messages.length === 0) messages.push({ role: "user", content: "" });
   return messages;
 }
 
-function buildBody(prompt: string, options: ChatOptions, stream: boolean): Record<string, unknown> {
+function buildBody(prompt: string | undefined, options: ChatOptions, stream: boolean): Record<string, unknown> {
   return {
     model: options.model || DEFAULT_MODEL,
     messages: buildMessages(prompt, options),
@@ -238,14 +250,14 @@ function mergeToolCalls(
  * Yields plain strings, so a caller that only wants the text never touches SSE.
  * Use streamEvents when tool calls are needed.
  */
-export async function* stream(prompt: string, options: ChatOptions = {}): AsyncGenerator<string> {
+export async function* stream(prompt?: string, options: ChatOptions = {}): AsyncGenerator<string> {
   for await (const event of streamEvents(prompt, options)) {
     if (event.delta) yield event.delta;
   }
 }
 
 /** Same as stream(), but yields structured events including accumulated tool calls. */
-export async function* streamEvents(prompt: string, options: ChatOptions = {}): AsyncGenerator<StreamEvent> {
+export async function* streamEvents(prompt?: string, options: ChatOptions = {}): AsyncGenerator<StreamEvent> {
   const response = await fetch(`${apiBase(options.baseUrl)}/chat/completions`, {
     method: "POST",
     headers: {
@@ -294,7 +306,7 @@ export async function* streamEvents(prompt: string, options: ChatOptions = {}): 
 }
 
 /** Collect a full streamed answer. Convenient when streaming is not needed downstream. */
-export async function chat(prompt: string, options: ChatOptions = {}): Promise<ChatResult> {
+export async function chat(prompt?: string, options: ChatOptions = {}): Promise<ChatResult> {
   let text = "";
     let route: Route = { provider: null, model: null, attemptTrail: null };
     let toolCalls: ToolCall[] = [];
@@ -309,7 +321,7 @@ export async function chat(prompt: string, options: ChatOptions = {}): Promise<C
 }
 
 /** One non-streaming request, returning the parsed OpenAI-shaped envelope. */
-export async function complete(prompt: string, options: ChatOptions = {}): Promise<ChatResult> {
+export async function complete(prompt?: string, options: ChatOptions = {}): Promise<ChatResult> {
   const response = await fetch(`${apiBase(options.baseUrl)}/chat/completions`, {
     method: "POST",
     headers: {
