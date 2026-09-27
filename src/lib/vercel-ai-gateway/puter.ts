@@ -313,14 +313,15 @@ export async function puterChatCompletion(
     const puter = getInstance(token);
     const messages = toChatMessages(body);
     const stream = body.stream === true;
-    // Puter's streaming mode drops tool_calls entirely - verified: the same request that
-    // returns a real call non-streamed comes back with no tool calls and finish_reason
-    // "stop" when stream is set. A tool turn produces no user-visible text, so there is
-    // nothing to stream incrementally; the call is fetched non-streamed and emitted as a
-    // single complete delta, which keeps a tool loop correct on a streamed response.
-    const wantsTools = Array.isArray(body.tools) && body.tools.length > 0;
-    const upstreamStream = stream && !wantsTools;
-    const options: Record<string, unknown> = { model, stream: upstreamStream };
+    // Upstream is always called non-streamed. Puter's streaming mode is not dependable:
+    // the same prompt that returns "PONG" non-streamed intermittently yields a role delta
+    // and finish_reason "stop" with no content at all, and it drops tool_calls outright.
+    // A fabricated-but-valid SSE stream is strictly better than a real stream that loses
+    // the answer, so the response is synthesised here instead. NAR forwards these frames
+    // through unmodified, so clients still receive a normal OpenAI stream. The cost is
+    // time-to-first-byte on Puter, which is acceptable at priority 960 where it is the
+    // last-resort free route.
+    const options: Record<string, unknown> = { model, stream: false };
     const maxTokens = typeof body.max_tokens === "number"
       ? body.max_tokens
       : typeof body.max_completion_tokens === "number"
@@ -333,7 +334,7 @@ export async function puterChatCompletion(
     // prompt text. Verified: both gemma-4-26b-a4b-it and infron:qwen/qwen3.8-27b:free
     // return a real tool_calls array when tools are present. Without this the model gets
     // no schema, answers in prose, and a tool loop silently makes no progress.
-    if (wantsTools) options.tools = body.tools;
+    if (Array.isArray(body.tools) && body.tools.length > 0) options.tools = body.tools;
     if (typeof body.tool_choice === "string" || (body.tool_choice && typeof body.tool_choice === "object")) {
       options.tool_choice = body.tool_choice;
     }
