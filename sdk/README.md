@@ -1,19 +1,28 @@
-# nar-client
+# @nexuss0781/nar
 
 Minimal TypeScript client for **Nexuss AI Router (NAR)**. Zero dependencies.
 
 Do not hand-write `curl` requests, and do not call a provider directly. NAR routes
 every call to a healthy free model and falls back automatically when one is busy.
 
+## Install
+
+```bash
+npm install @nexuss0781/nar
+```
+
+Zero dependencies. Node 18+, Bun, Deno, Cloudflare Workers, Vercel Edge.
+
 ```bash
 export NAR_BASE_URL="https://omniouter-vercel.vercel.app"
 export NAR_API_KEY="<your master key>"
 ```
 
+
 ## Stream a completion
 
 ```ts
-import { stream } from "nar-client";
+import { stream } from "@nexuss0781/nar";
 
 for await (const delta of stream("Explain ownership in Rust in two sentences")) {
   process.stdout.write(delta);
@@ -23,7 +32,7 @@ for await (const delta of stream("Explain ownership in Rust in two sentences")) 
 ## Get the whole answer
 
 ```ts
-import { chat } from "nar-client";
+import { chat } from "@nexuss0781/nar";
 
 const { text, route } = await chat("Write a haiku about routers");
 console.log(text);
@@ -52,7 +61,7 @@ await chat("hi", { model: "puter/infron:qwen/qwen3.8-27b:free" });
 Call `models()` to list what is live right now:
 
 ```ts
-import { models } from "nar-client";
+import { models } from "@nexuss0781/nar";
 console.log(await models());
 ```
 
@@ -61,7 +70,7 @@ console.log(await models());
 Tool call deltas are accumulated for you and arrive keyed by index.
 
 ```ts
-import { streamEvents, complete } from "nar-client";
+import { streamEvents, complete } from "@nexuss0781/nar";
 
 for await (const event of streamEvents("What is the weather in Oslo?", {
   tools: [{
@@ -89,7 +98,7 @@ multi-turn tool loop does not silently change models mid-conversation.
 ## Errors
 
 ```ts
-import { NarError } from "nar-client";
+import { NarError } from "@nexuss0781/nar";
 
 try {
   await chat("hi");
@@ -107,7 +116,7 @@ to tell "the model was bad" from "every free tier was rate-limited".
 ## Health
 
 ```ts
-import { health } from "nar-client";
+import { health } from "@nexuss0781/nar";
 const report = await health();
 console.log(report.checks.find((c) => c.name === "puter_auth"));
 ```
