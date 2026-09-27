@@ -109,12 +109,46 @@ for await (const event of streamEvents(prompt, { tools })) {
 }
 ```
 
-Feeding the result back for the next turn:
+## Multi-turn and tool loops
+
+Pass `messages` to keep the conversation. Without it every call is stateless and the
+model loses all earlier context. `prompt` is optional; a non-empty one is appended as
+a final user turn.
 
 ```ts
-messages.push({ role: "assistant", content: r.text, tool_calls: r.toolCalls });
-messages.push({ role: "tool", tool_call_id: r.toolCalls[0].id, content: "12C and clear" });
+import { chat } from "@nexuss0781/nar";
+
+const tools = [/* ... */];
+const messages = [{ role: "user", content: "Weather in Oslo, then summarise it." }];
+
+for (let turn = 0; turn < 6; turn++) {
+  const r = await chat("", { messages, tools, toolChoice: "auto" });
+
+  if (r.finishReason !== "tool_calls") {
+    console.log(r.text);
+    break;
+  }
+
+  messages.push({ role: "assistant", content: r.text, tool_calls: r.toolCalls });
+  for (const call of r.toolCalls) {
+    const result = await runTool(call.function.name, JSON.parse(call.function.arguments));
+    messages.push({
+      role: "tool",
+      tool_call_id: call.id,
+      content: typeof result === "string" ? result : JSON.stringify(result),
+    });
+  }
+}
 ```
+
+Always echo the assistant message with its `tool_calls`, and one `tool` message per
+call keyed by `tool_call_id`. A loop that skips this will not progress.
+
+`toolChoice: "none"` forces a text answer even when tools are available;
+`"required"` demands a call. Omitting it lets NAR decide.
+
+Free models are small: they emit valid calls but can misread the request, so validate
+parsed arguments before doing anything irreversible.
 
 NAR keeps a tool-calling conversation pinned to the model that started it, so a
 multi-turn tool loop does not silently change models mid-conversation.
