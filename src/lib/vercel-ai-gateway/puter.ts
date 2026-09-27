@@ -8,6 +8,7 @@
 // ("infron:qwen/qwen3.8-27b:free"). They are stored bare and qualified as
 // "puter/<id>" in NAR, so the slash inside the id never reaches the routing prefix.
 import { createRequire } from "node:module";
+import { join } from "node:path";
 
 export const PUTER_PROVIDER_ID = "puter";
 export const PUTER_API_ORIGIN = "https://api.puter.com";
@@ -74,13 +75,43 @@ function release(): void {
 
 // init() reads a browser bundle and evaluates it in a node:vm context, so it is lazy
 // and cached per token: it is expensive and must not run per request.
+//
+// init.cjs locates that bundle via resolve(__filename, '..') + '/../dist', so the
+// package must be required by its real on-disk path. createRequire(import.meta.url)
+// resolves against the *emitted server chunk* under a bundler, which is what made the
+// deployed function report "bundle not found" even though dist/puter.cjs ships in the
+// npm package. Resolving the entry from the project root first keeps this correct
+// regardless of how the module got bundled, and the createRequire path stays as a
+// fallback for non-standard layouts.
 function getInstance(token: string): PuterInstance {
   if (instance && instanceToken === token) return instance;
-  const require = createRequire(import.meta.url);
-  const { init } = require("@heyputer/puter.js/src/init.cjs");
+  const { init } = loadInit();
   instance = init(token) as PuterInstance;
   instanceToken = token;
   return instance;
+}
+
+type PuterInit = { init: (token: string) => unknown };
+
+function loadInit(): PuterInit {
+  const entry = "@heyputer/puter.js/src/init.cjs";
+  const attempts: Array<() => string> = [
+    () => require.resolve(entry, { paths: [process.cwd()] }),
+    () => createRequire(import.meta.url).resolve(entry),
+    () => createRequire(join(process.cwd(), "package.json")).resolve(entry),
+  ];
+  const failures: string[] = [];
+  for (const attempt of attempts) {
+    try {
+      const resolved = attempt();
+      const loaded = createRequire(resolved)(resolved) as PuterInit;
+      if (typeof loaded?.init === "function") return loaded;
+      failures.push(`${resolved} did not export init()`);
+    } catch (error) {
+      failures.push(`${describePuterError(error)}`);
+    }
+  }
+  throw new Error(`Unable to load @heyputer/puter.js: ${failures.join(" | ").slice(0, 300)}`);
 }
 
 function toChatMessages(body: Record<string, unknown>): unknown {
