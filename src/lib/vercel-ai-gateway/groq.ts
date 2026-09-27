@@ -11,9 +11,12 @@ export const GROQ_GUARD_DEFAULT_THRESHOLD = 0.5;
 export const GROQ_GUARD_TIMEOUT_MS = 10_000;
 
 // NVIDIA was verified to emit native tool_calls with well-formed arguments on every
-// registered model, so it skips prompt-based tool injection for the same reason as the
-// others: the upstream already speaks the protocol.
-const NATIVE_TOOL_PROVIDER_PREFIXES = [GROQ_PROVIDER_ID, MISTRAL_PROVIDER_ID, NVIDIA_PROVIDER_ID];
+  // registered model, so it skips prompt-based tool injection for the same reason as the
+  // others: the upstream already speaks the protocol. Puter qualifies because puter.ts
+  // forwards the tool schema to puter.ai.chat and maps tool_calls back into the OpenAI
+  // shape; verified returning a real call for gemma-4-26b-a4b-it and
+  // infron:qwen/qwen3.8-27b:free.
+  const NATIVE_TOOL_PROVIDER_PREFIXES = [GROQ_PROVIDER_ID, MISTRAL_PROVIDER_ID, NVIDIA_PROVIDER_ID, "puter"];
 
 export function supportsNativeToolCalls(model: string): boolean {
   const head = model.split("/", 1)[0];

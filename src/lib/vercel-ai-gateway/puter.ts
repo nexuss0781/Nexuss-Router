@@ -195,11 +195,47 @@ function flattenMessages(messages: unknown): string {
   return parts.join("\n");
 }
 
+type OpenAiToolCall = {
+  id: string;
+  type: "function";
+  function: { name: string; arguments: string };
+};
+
+// Puter returns tool calls already close to the OpenAI shape, but arguments can arrive as
+// an object and some models attach extra_content, so each field is normalised explicitly
+// rather than passed through.
+function toOpenAiToolCalls(result: PuterChatResult): OpenAiToolCall[] {
+  const raw = result?.message?.tool_calls;
+  if (!Array.isArray(raw)) return [];
+  const out: OpenAiToolCall[] = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== "object") continue;
+    const call = entry as Record<string, any>;
+    const fn = (call.function ?? {}) as Record<string, any>;
+    const name = typeof fn.name === "string" ? fn.name : typeof call.name === "string" ? call.name : "";
+    if (!name) continue;
+    const args = fn.arguments ?? call.arguments;
+    out.push({
+      id: typeof call.id === "string" && call.id ? call.id : `call_puter_${out.length}`,
+      type: "function",
+      function: {
+        name,
+        arguments: typeof args === "string" ? args : JSON.stringify(args ?? {}),
+      },
+    });
+  }
+  return out;
+}
+
 function sseChunk(payload: unknown): string {
   return `data: ${JSON.stringify(payload)}\n\n`;
 }
 
-function toStream(model: string, text: string, usage: Record<string, unknown>): Response {
+// Puter's streaming mode does not expose usable per-token tool-call deltas, so a tool
+// turn is emitted as a single complete delta. That is still a valid OpenAI stream and
+// keeps a tool loop correct, which matters because NAR pins a tool conversation to the
+// provider that started it.
+function toStream(model: string, text: string, usage: Record<string, unknown>, toolCalls: OpenAiToolCall[] = []): Response {
   const base = {
     id: `chatcmpl-puter-${Date.now()}`,
     object: "chat.completion.chunk",
@@ -207,22 +243,34 @@ function toStream(model: string, text: string, usage: Record<string, unknown>): 
     model,
   };
   const first = sseChunk({ ...base, choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null }] });
-  const content = sseChunk({ ...base, choices: [{ index: 0, delta: { content: text }, finish_reason: null }] });
-  const last = sseChunk({ ...base, choices: [{ index: 0, delta: {}, finish_reason: "stop" }], usage });
-  return new Response(`${first}${content}${last}data: [DONE]\n\n`, {
+  const body = toolCalls.length > 0
+    ? sseChunk({ ...base, choices: [{ index: 0, delta: { tool_calls: toolCalls.map((call, index) => ({ index, ...call })) }, finish_reason: null }] })
+    : text
+      ? sseChunk({ ...base, choices: [{ index: 0, delta: { content: text }, finish_reason: null }] })
+      : "";
+  const last = sseChunk({
+    ...base,
+    choices: [{ index: 0, delta: {}, finish_reason: toolCalls.length > 0 ? "tool_calls" : "stop" }],
+    usage,
+  });
+  return new Response(`${first}${body}${last}data: [DONE]\n\n`, {
     status: 200,
     headers: { "content-type": "text/event-stream", "cache-control": "no-cache" },
   });
 }
 
-function toJson(model: string, text: string, usage: Record<string, unknown>): Response {
+function toJson(model: string, text: string, usage: Record<string, unknown>, toolCalls: OpenAiToolCall[] = []): Response {
   return new Response(
     JSON.stringify({
       id: `chatcmpl-puter-${Date.now()}`,
       object: "chat.completion",
       created: Math.floor(Date.now() / 1000),
       model,
-      choices: [{ index: 0, message: { role: "assistant", content: text }, finish_reason: "stop" }],
+      choices: [{
+        index: 0,
+        message: { role: "assistant", content: text, ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}) },
+        finish_reason: toolCalls.length > 0 ? "tool_calls" : "stop",
+      }],
       usage,
     }),
     { status: 200, headers: { "content-type": "application/json" } },
@@ -274,11 +322,20 @@ export async function puterChatCompletion(
     if (typeof maxTokens === "number" && maxTokens > 0) options.max_tokens = maxTokens;
     if (typeof body.temperature === "number") options.temperature = body.temperature;
     if (typeof body.top_p === "number") options.top_p = body.top_p;
+    // Puter handles tools natively, so the schema is forwarded rather than baked into the
+    // prompt text. Verified: both gemma-4-26b-a4b-it and infron:qwen/qwen3.8-27b:free
+    // return a real tool_calls array when tools are present. Without this the model gets
+    // no schema, answers in prose, and a tool loop silently makes no progress.
+    if (Array.isArray(body.tools) && body.tools.length > 0) options.tools = body.tools;
+    if (typeof body.tool_choice === "string" || (body.tool_choice && typeof body.tool_choice === "object")) {
+      options.tool_choice = body.tool_choice;
+    }
 
     const result = await puter.ai.chat(flattenMessages(messages), options);
-    const text = contentToText(result?.message?.content ?? result?.text ?? "");
+    const toolCalls = toOpenAiToolCalls(result);
+    const text = toolCalls.length > 0 ? "" : contentToText(result?.message?.content ?? result?.text ?? "");
     const usage = usageFrom(result);
-    return stream ? toStream(model, text, usage) : toJson(model, text, usage);
+    return stream ? toStream(model, text, usage, toolCalls) : toJson(model, text, usage, toolCalls);
   } catch (error) {
     const message = describePuterError(error);
     const aborted = /abort/i.test(message);
