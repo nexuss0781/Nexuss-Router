@@ -22,6 +22,12 @@ export const PROVIDER_RATE_LIMITS: Record<string, RateLimit> = {
   // ~15-20 req/min, and each model carries an independent budget, so a shared row never
   // understates a model's own allowance. Sits below the observed ceiling on purpose.
   nvidia: { requestsPerMinute: 15, source: "measured" },
+  // Published at docs.puter.com/rate-limits-and-quotas: free tier is 30 requests per 10s
+  // per interface+method, with 3 concurrent. Measured on this account: 25 simultaneous
+  // calls all passed, 30 at once started failing, and 40 at once gave 10 ok / 30 x 429, so
+  // concurrency is the real ceiling and is enforced in puter.ts. 30 per 10s is 180 rpm;
+  // held to 120 because the window is shared by every registered model.
+  puter: { requestsPerMinute: 120, source: "published-free-tier" },
 };
 
 // Mistral sets limits per model rather than per account, and the spread is wide:

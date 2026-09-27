@@ -76,6 +76,12 @@ import {
   NVIDIA_PROVIDER_ID,
 } from "./nvidia";
 import {
+  PUTER_MODELS,
+  PUTER_PROVIDER_ID,
+  puterChatCompletion,
+  puterBaseUrl,
+} from "./puter";
+import {
   applyUpstreamRateLimitHeaders,
   consumeRateLimit,
   isRateLimitExhausted,
@@ -211,6 +217,20 @@ const BUILTIN_OPTIONAL_PROVIDERS: AiProvider[] = [
     priority: 965,
     models: NVIDIA_MODELS,
   },
+  {
+    // Free on every model it serves (cost 0 at the model level, confirmed usd_cents=0 on
+    // live calls) and backed by a 1000-credit monthly allowance with no card required, so
+    // it outranks the metered-free tiers. Ranks below NVIDIA and OpenRouter only because
+    // Puter has no OpenAI-compatible endpoint on a free plan: every call goes through the
+    // SDK, and the account is a single shared token, so its budget is the least durable
+    // free route in the stack.
+    id: PUTER_PROVIDER_ID,
+    baseUrl: puterBaseUrl(),
+    apiKey: "",
+    format: "puter",
+    priority: 960,
+    models: PUTER_MODELS,
+  },
 ];
 
 const EXCLUDED_ORIGINAL_MODELS = new Set([
@@ -267,6 +287,12 @@ const BUILTIN_PROVIDER_ENV: BuiltinProviderEnv[] = [
     apiKeyNames: ["OMNIROUTE_NVIDIA_API_KEY", "NVIDIA_API_KEY", "NVIDIA_API_CATALOG_KEY", "NGC_API_KEY"],
     baseUrlNames: ["OMNIROUTE_NVIDIA_BASE_URL", "NVIDIA_BASE_URL", "NVIDIA_API_BASE"],
     modelsNames: ["OMNIROUTE_NVIDIA_MODELS", "NVIDIA_MODELS"],
+  },
+  {
+    providerId: PUTER_PROVIDER_ID,
+    apiKeyNames: ["OMNIROUTE_PUTER_TOKEN", "OMNIROUTE_PUTER_API_KEY", "PUTER_AUTH_TOKEN"],
+    baseUrlNames: ["OMNIROUTE_PUTER_BASE_URL", "PUTER_API_ORIGIN"],
+    modelsNames: ["OMNIROUTE_PUTER_MODELS", "PUTER_MODELS"],
   },
 ];
 
@@ -1119,14 +1145,16 @@ export async function handleAiOnlyChatCompletions(request: Request, dependencies
       const timeout = setTimeout(() => controller.abort(), deadline);
       const startedAt = Date.now();
       try {
-        const floored = withMaxTokensFloor(requestBody, upstreamModel);
-        const upstreamBody = provider.id === MISTRAL_PROVIDER_ID ? normalizeMistralParams(floored.body) : floored.body;
-        const upstream = await fetch(endpoint, {
-          method: "POST",
-          headers: upstreamHeaders(provider),
-          body: JSON.stringify({ ...upstreamBody, model: upstreamModel }),
-          signal: controller.signal,
-        });
+          const floored = withMaxTokensFloor(requestBody, upstreamModel);
+          const upstreamBody = provider.id === MISTRAL_PROVIDER_ID ? normalizeMistralParams(floored.body) : floored.body;
+          const upstream = provider.id === PUTER_PROVIDER_ID
+            ? await puterChatCompletion({ ...upstreamBody, model: upstreamModel }, upstreamModel, controller.signal)
+            : await fetch(endpoint, {
+              method: "POST",
+              headers: upstreamHeaders(provider),
+              body: JSON.stringify({ ...upstreamBody, model: upstreamModel }),
+              signal: controller.signal,
+            });
         if (requestBody.stream === true) {
           if (!upstream.ok || !isEventStream(upstream.headers.get("content-type"))) {
             await upstream.body?.cancel().catch(() => undefined);
