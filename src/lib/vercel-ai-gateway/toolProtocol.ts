@@ -306,8 +306,14 @@ export function normalizeChatToolRequest(input: unknown, options: { injectPrompt
   delete normalized.tool_affinity;
   delete normalized.functions;
   delete normalized.function_call;
-  if (hasTools) normalized.tools = source.tools;
-  else delete normalized.tools;
+    if (hasTools) normalized.tools = source.tools;
+    else delete normalized.tools;
+    // tool_choice "none" means no tool may be called this turn, so the tools are
+    // withheld from the provider entirely rather than sent with a request to decline
+    // them. Providers disagree on this: verified live that a non-streamed call routed to
+    // Mistral honoured "none" while a streamed call on another route emitted a tool call
+    // anyway. Withholding the schema makes the guarantee provider-independent.
+    if (choice.value === "none") delete normalized.tools;
   if (choice.value !== undefined) normalized.tool_choice = choice.value;
   else delete normalized.tool_choice;
   if (hasIntent && options.injectPrompt !== false && !hasProtocolMarker(messages)) {
