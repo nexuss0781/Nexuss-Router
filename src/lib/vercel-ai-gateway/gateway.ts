@@ -78,6 +78,7 @@ import {
 import {
   PUTER_MODELS,
   PUTER_PROVIDER_ID,
+  probePuterAuth,
   puterChatCompletion,
   puterBaseUrl,
 } from "./puter";
@@ -291,7 +292,7 @@ const BUILTIN_PROVIDER_ENV: BuiltinProviderEnv[] = [
   {
     providerId: PUTER_PROVIDER_ID,
     apiKeyNames: ["OMNIROUTE_PUTER_TOKEN", "OMNIROUTE_PUTER_API_KEY", "PUTER_AUTH_TOKEN"],
-    baseUrlNames: ["OMNIROUTE_PUTER_BASE_URL", "PUTER_API_ORIGIN"],
+    baseUrlNames: [],
     modelsNames: ["OMNIROUTE_PUTER_MODELS", "PUTER_MODELS"],
   },
 ];
@@ -545,11 +546,25 @@ export async function getAiGatewayHealth(dependencies: ParadRequestDependencies 
   // cannot serve with any source: configured-and-unreachable Supabase with no
   // builtin fallback, or no providers at all.
   const ready = providerCatalogOk;
+  // Only consulted when Puter is actually registered, and deliberately excluded from
+  // `ready`: a dead Puter token must be visible without taking the whole router down,
+  // because NAR silently falls back to the other five providers and keeps serving.
+  const puterRegistered = uniqueProviders.some((provider) => provider.id === PUTER_PROVIDER_ID);
+  const puterAuth = puterRegistered ? await probePuterAuth() : null;
   const checks = [
     { name: "gateway", status: "ok", detail: `providers:${uniqueProviders.length} models:${modelCount} key_config:${gatewayKey ? "env" : "none"}` },
     { name: "migration", status: migration.attempted ? migration.applied ? "ok" : "degraded" : "ok", detail: migration.detail },
     { name: "supabase", status: supabase.configured ? supabase.reachable ? (supabase.tablesMissing ? "degraded" : "ok") : "degraded" : "not_configured", detail: supabase.tablesMissing ? "schema_missing" : supabase.error || (supabase.reachable ? "reachable" : "configured") },
     { name: "providers", status: providerCatalogOk ? "ok" : "down", detail: uniqueProviders.map((provider) => `${provider.id}:${provider.models.filter((id) => !isExcludedModel(provider.id, id)).length}`).join(",") || "none" },
+    ...(puterAuth
+      ? [{
+        // "unreachable" is inconclusive rather than bad news about the token, so it reads
+        // as degraded with the reason attached instead of implying a rotated credential.
+        name: "puter_auth",
+        status: puterAuth.state === "ok" ? "ok" : puterAuth.state === "unconfigured" ? "not_configured" : "degraded",
+        detail: `${puterAuth.state}:${puterAuth.detail}`,
+      }]
+      : []),
   ];
   return jsonResponse({ status: ready ? "ok" : "degraded", ready, uptime: process.uptime(), checks }, ready ? 200 : 503);
 }

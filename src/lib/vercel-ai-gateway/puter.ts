@@ -256,6 +256,61 @@ function describePuterError(error: unknown): string {
   return String(error);
 }
 
+// The SDK resolves its own origin internally and ignores a base-URL override, so this is
+// the fixed, truthful value rather than a configurable knob. It exists only because
+// AiProvider.baseUrl is required, and provider registration filters on it being non-empty.
 export function puterBaseUrl(): string {
-  return (firstEnv("OMNIROUTE_PUTER_BASE_URL", "PUTER_API_ORIGIN") || PUTER_API_ORIGIN).replace(/\/+$/, "");
+  return PUTER_API_ORIGIN;
+}
+
+// Health probe. The token is a session JWT with no exp claim, so signing out of Puter
+// kills it and every call starts returning 401 - which the gateway classifies as
+// retryable and silently routes around, leaving the provider registered but dead. There
+// is no plain HTTP endpoint that validates the token (the SDK resolves auth through
+// driver calls), so the only real check is a live call, on a zero-cost model with a
+// single output token.
+//
+// Cached for PROBE_TTL_MS because init() evaluates the puter.js bundle and costs seconds
+// on a cold lambda, and because the health endpoint is polled. Being in-memory it is
+// still per-instance, so this buys per-lambda coverage rather than a global guarantee.
+const PROBE_TTL_MS = 5 * 60 * 1000;
+const PROBE_MODEL = "gemma-4-26b-a4b-it";
+let probeCache: { at: number; result: PuterAuthState } | null = null;
+
+export type PuterAuthState = {
+  state: "ok" | "rejected" | "unreachable" | "unconfigured";
+  detail: string;
+  checkedAt: number;
+};
+
+export async function probePuterAuth(force = false): Promise<PuterAuthState> {
+  const now = Date.now();
+  if (!force && probeCache && now - probeCache.at < PROBE_TTL_MS) return probeCache.result;
+  const result = await runProbe();
+  probeCache = { at: now, result };
+  return result;
+}
+
+async function runProbe(): Promise<PuterAuthState> {
+  const checkedAt = Date.now();
+  const token = puterApiKey();
+  if (!token) return { state: "unconfigured", detail: "no token in env", checkedAt };
+  try {
+    const puter = getInstance(token);
+    await puter.ai.chat("ping", { model: PROBE_MODEL, max_tokens: 1 });
+    return { state: "ok", detail: `token accepted by ${PROBE_MODEL}`, checkedAt };
+  } catch (error) {
+    const message = describePuterError(error);
+    const state = classifyPuterProbeError(message);
+    return { state, detail: message.slice(0, 160), checkedAt };
+  }
+}
+
+// Only an explicit credentials rejection counts as a dead token. A network or 5xx
+// failure says nothing about the token, and reporting it as rejected would send someone
+// hunting a rotated credential that never expired. Exported so this branch is testable
+// without having to actually cut the network.
+export function classifyPuterProbeError(message: string): "rejected" | "unreachable" {
+  const rejected = /unauthor|forbidden|401|403|invalid token|token.*(expired|invalid)|auth/i.test(message);
+  return rejected ? "rejected" : "unreachable";
 }
