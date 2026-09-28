@@ -31,6 +31,46 @@
 
 ---
 
+## Use it for free in five steps
+
+**1. Fork this repository.**
+
+**2. Deploy it to Vercel.** Import the fork, accept the defaults, deploy. You get
+a URL like `https://nar-abc123.vercel.app`.
+
+**3. Set two environment variables.** In the Vercel project, add:
+
+| Variable | Value |
+|---|---|
+| `OMNIROUTE_AI_API_KEY` | Any random string you invent |
+| *one* source credential | `OMNIROUTE_PUTER_TOKEN`, or a free key from any source in [`.env.example`](.env.example) |
+
+Redeploy. That is the entire configuration — [`.env.example`](.env.example)
+lists every optional variable and what it changes.
+
+**4. Point the SDK at your deployment.**
+
+```ts
+import { createClient } from "@nexuss0781/nar";
+
+const nar = createClient({
+  baseUrl: "https://nar-abc123.vercel.app",
+  apiKey: process.env.NAR_API_KEY!,
+});
+
+const r = await nar.chat("Explain ownership in Rust");
+console.log(r.text);
+```
+
+**5. Let an agent do the rest.** Point any agent at
+[the skill](.opencode/skills/nexuss-ai-router/SKILL.md) and it integrates NAR
+into your app on its own.
+
+There is no billing step because there is nothing to bill. You run it, you use
+the free tiers you already have access to, and you never see a rate limit.
+
+---
+
 ## Your agent can integrate this by itself
 
 There is a complete instruction file in this repository. An agent reads it once
@@ -47,7 +87,7 @@ itself up correctly on the first attempt — because the file tells it exactly w
 to do instead of making it guess from an API reference and get the tool-call
 plumbing wrong.
 
-It is 365 lines, dependency-free, and versioned with the gateway, so it cannot
+It is 401 lines, dependency-free, and versioned with the gateway, so it cannot
 describe an interface that no longer exists.
 
 <details>
@@ -122,7 +162,8 @@ npm install @nexuss0781/nar
 ```
 
 ```bash
-export NAR_API_KEY="<your key>"
+export NAR_BASE_URL="https://nar-abc123.vercel.app"   # your deployment
+export NAR_API_KEY="<your OMNIROUTE_AI_API_KEY>"
 ```
 
 ```ts
@@ -135,6 +176,30 @@ for await (const delta of stream("explain ownership in Rust")) {
 
 No client to configure, no model to choose, no limit to respect. An existing
 OpenAI client keeps working unchanged — the wire format is the same.
+
+### Bind the deployment once
+
+`createClient` takes the URL and key a single time, so neither is repeated at
+every call site:
+
+```ts
+import { createClient } from "@nexuss0781/nar";
+
+const nar = createClient({
+  baseUrl: "https://nar-abc123.vercel.app",
+  apiKey: process.env.NAR_API_KEY!,
+});
+
+const r = await nar.chat("Summarise this changelog", { maxTokens: 400 });
+```
+
+The six calls work identically on the client and as free functions. Prefer
+`createClient()` in an app, and the free functions in a script.
+
+The URL is required rather than defaulted, because every fork deploys somewhere
+different and a default would silently send your key to someone else's
+deployment. Set `NAR_BASE_URL` or pass `baseUrl`, and the error message says so if
+you forget. `/api/v1` is appended for you if you include it.
 
 ---
 
@@ -174,6 +239,7 @@ You get an answer, or an error about your request. Nothing in between.
 | `complete(prompt, opts)` | `ChatResult` | Non-streaming, reports `usage` |
 | `models(opts)` | `string[]` | What is available right now |
 | `health(opts)` | `{ status, ready, checks[] }` | Uptime and diagnosis |
+| `createClient({ baseUrl, apiKey })` | `NarClient` | Bind the deployment once |
 
 ```ts
 const r = await chat("Summarise this changelog", { maxTokens: 400 });

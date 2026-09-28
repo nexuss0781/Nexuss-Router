@@ -107,8 +107,20 @@ export class NarError extends Error {
 const DEFAULT_MODEL = "auto";
 
 function envBase(): string {
-  const raw = process.env.NAR_BASE_URL || process.env.OMNIROUTE_BASE_URL || "https://omniouter-vercel.vercel.app";
-  return raw.replace(/\/+$/, "");
+  const raw = process.env.NAR_BASE_URL || process.env.OMNIROUTE_BASE_URL || "";
+  const base = raw.replace(/\/+$/, "");
+  if (!base) {
+    throw new NarError(
+      "No deployment URL. Set NAR_BASE_URL to your NAR deployment (for example https://nar-abc123.vercel.app), " +
+        "or pass baseUrl explicitly, or bind one with createClient(). " +
+        "Every fork deploys to its own URL, so there is no correct default.",
+      500,
+      "missing_base_url",
+      { provider: null, model: null, attemptTrail: null },
+      null,
+    );
+  }
+  return base;
 }
 
 function envKey(): string {
@@ -373,4 +385,61 @@ export async function health(options: { baseUrl?: string; signal?: AbortSignal }
 }
 
 export const nar = { stream, streamEvents, chat, complete, models, health };
+
+/**
+ * A client bound to one deployment. Every call keeps that URL and key unless
+ * overridden per call, so the URL is written once instead of being repeated at
+ * each call site.
+ */
+export type NarClient = {
+  readonly baseUrl: string;
+  stream(prompt?: string, options?: ChatOptions): AsyncGenerator<string>;
+  streamEvents(prompt?: string, options?: ChatOptions): AsyncGenerator<StreamEvent>;
+  chat(prompt?: string, options?: ChatOptions): Promise<ChatResult>;
+  complete(prompt?: string, options?: ChatOptions): Promise<ChatResult>;
+  models(options?: { signal?: AbortSignal }): Promise<string[]>;
+  health(options?: { signal?: AbortSignal }): Promise<HealthReport>;
+};
+
+/**
+ * Bind a deployment URL and key once, then use the returned client everywhere.
+ *
+ * Each fork deploys to its own URL, so the URL is an input rather than a default.
+ *
+ * ```ts
+ * const nar = createClient({
+ *   baseUrl: "https://nar-abc123.vercel.app",
+ *   apiKey: process.env.NAR_API_KEY!,
+ * });
+ *
+ * const r = await nar.chat("explain ownership");
+ * ```
+ *
+ * Falls back to NAR_BASE_URL and NAR_API_KEY when a field is omitted.
+ */
+export function createClient(options: { baseUrl?: string; apiKey?: string } = {}): NarClient {
+  const baseUrl = (options.baseUrl || envBase()).replace(/\/+$/, "");
+  if (!options.apiKey && !process.env.NAR_API_KEY && !process.env.OMNIROUTE_AI_API_KEY) {
+    throw new NarError(
+      "No API key. Pass apiKey to createClient(), or set NAR_API_KEY to the OMNIROUTE_AI_API_KEY value " +
+        "you configured on your deployment.",
+      401,
+      "missing_api_key",
+      { provider: null, model: null, attemptTrail: null },
+      null,
+    );
+  }
+  const apiKey = options.apiKey;
+  const withKey = (o: ChatOptions = {}): ChatOptions => (apiKey ? { ...o, apiKey, baseUrl } : { ...o, baseUrl });
+  return {
+    baseUrl,
+    stream: (p, o) => stream(p, withKey(o)),
+    streamEvents: (p, o) => streamEvents(p, withKey(o)),
+    chat: (p, o) => chat(p, withKey(o)),
+    complete: (p, o) => complete(p, withKey(o)),
+    models: (o = {}) => models({ ...o, baseUrl, ...(apiKey ? { apiKey } : {}) }),
+    health: (o = {}) => health({ ...o, baseUrl }),
+  };
+}
+
 export default nar;

@@ -32,25 +32,61 @@ Read this first, then act. Do not explore providers directly.
 
 ## 1. Set up
 
+Two cases. Ask which one applies before writing code, or infer it from whether the
+user has a NAR deployment URL.
+
+### Case A: the user forked and deployed NAR (their own instance)
+
+This is the common case. Each fork deploys to its own Vercel URL, so the URL is an
+input, never a default.
+
 ```bash
 npm install @nexuss0781/nar
 ```
 
-Zero dependencies, Node 18+, Bun, Deno, Cloudflare Workers, Vercel Edge.
+```ts
+import { createClient } from "@nexuss0781/nar";
 
-```bash
-export NAR_BASE_URL="https://omniouter-vercel.vercel.app"   # optional, this is the default
-export NAR_API_KEY="<master key>"                          # required
+const nar = createClient({
+  baseUrl: "https://nar-abc123.vercel.app",   // their deployment
+  apiKey: process.env.NAR_API_KEY!,
+});
+
+const r = await nar.chat("Explain ownership in Rust");
 ```
 
-`NAR_API_KEY` falls back to `OMNIROUTE_AI_API_KEY`. The client resolves, in order:
-`options.apiKey` → `NAR_API_KEY` → `OMNIROUTE_AI_API_KEY` → throws `NarError` 401
-`missing_api_key`. Never hardcode a key; always read the environment.
+Or via the environment, which is better for scripts and CI:
 
-For your own deployment, `NAR_BASE_URL` may be any host, with or without a trailing
-`/api/v1`. The client appends `/api/v1` when it is missing.
+```bash
+export NAR_BASE_URL="https://nar-abc123.vercel.app"
+export NAR_API_KEY="<the OMNIROUTE_AI_API_KEY they set on the deployment>"
+```
 
-## 2. The six calls
+**There is no default deployment URL.** If neither `baseUrl` nor `NAR_BASE_URL` is
+set, the client throws `NarError` 500 `missing_base_url`. Never point a user's key
+at some other instance you happen to know about.
+
+### Case B: the user pointed you at an existing NAR instance
+
+Use the URL and key they gave you, verbatim. Do not invent a base URL.
+
+### Shared rules
+
+- `NAR_API_KEY` falls back to `OMNIROUTE_AI_API_KEY`. Resolution order:
+  `options.apiKey` → `NAR_API_KEY` → `OMNIROUTE_AI_API_KEY` → throws `NarError` 401
+  `missing_api_key`.
+- The client resolves the URL as `options.baseUrl` → `NAR_BASE_URL` →
+  `OMNIROUTE_BASE_URL` → throws `missing_base_url`.
+- Prefer `createClient()` in an application, because the URL and key are written
+  once instead of at every call site. Use the free functions in a one-off script.
+- `NAR_BASE_URL` may be any host, with or without a trailing `/api/v1`. The client
+  appends `/api/v1` when it is missing.
+- Never hardcode either value. Always read the environment.
+- If the user asks you to deploy NAR for them, the whole configuration is
+  `OMNIROUTE_AI_API_KEY` plus one source credential, and `.env.example` in the
+  repository lists every optional variable.
+
+## 2. The six calls, plus createClient
 
 | Call | Returns | Use for |
 | --- | --- | --- |
