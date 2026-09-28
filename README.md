@@ -2,229 +2,331 @@
 
 # Nexuss AI Router
 
-**NAR** — the OpenAI-compatible gateway that fronts your model providers behind a single key, routes every request to a healthy model, and keeps tool-calling conversations pinned to the model that started them.
+**One endpoint. Any model. You never handle a rate limit again.**
 
+[![npm](https://img.shields.io/npm/v/@nexuss0781/nar-000000?style=flat-square&logo=npm)](https://www.npmjs.com/package/@nexuss0781/nar)
 [![Next.js](https://img.shields.io/badge/Next.js-16.3.1-000000?style=flat-square&logo=next.js)](https://nextjs.org)
-[![React](https://img.shields.io/badge/React-19.2-087ea4?style=flat-square&logo=react)](https://react.dev)
+[![React](https://img.shields.io/badge/React-19.2.0-087ea4?style=flat-square&logo=react)](https://react.dev)
 [![TypeScript](https://img.shields.io/badge/TypeScript-7.0.2-3178c6?style=flat-square&logo=typescript)](https://www.typescriptlang.org)
 [![Node](https://img.shields.io/badge/Node-%3E%3D22.22.2-5fa04e?style=flat-square&logo=node.js)](https://nodejs.org)
-[![Supabase](https://img.shields.io/badge/Supabase-PostgreSQL-3ecf8e?style=flat-square&logo=supabase)](https://supabase.com)
+[![License: MIT](https://img.shields.io/badge/license-MIT-000000?style=flat-square)](./LICENSE)
 
 </div>
 
 ---
 
-## Overview
+## The problem
 
-Nexuss AI Router is a self-hosted AI gateway that speaks the OpenAI API. Point any OpenAI-compatible client at it and it works immediately — the client never handles a provider credential, never hardcodes a model name, and never has to handle a provider outage.
+Every free model comes with a limit. Yours will hit it — usually at 2am, usually
+mid-run, usually in the middle of an agent loop. So you write retry logic, a
+backoff timer, a model-fallback chain, and a health check you will forget to
+maintain. Then a new provider appears and the whole thing needs revisiting.
 
-```bash
-curl -sS "$NAR_BASE/api/v1/chat/completions" \
-  -H "authorization: Bearer $NAR_KEY" \
-  -H "content-type: application/json" \
-  -d '{"model":"auto","messages":[{"role":"user","content":"Hello"}]}'
-```
+That layer is the same in every project, and it is almost never the interesting
+part.
 
-One key in, one JSON completion out — with streaming, tool calls, and provider failover already handled.
+**NAR is that layer, already built.** You send a request. NAR picks a model that is
+not currently limited, and if something goes wrong it moves to another one
+transparently. A 429 never reaches your code — you get an answer, or an error that
+is actually about your request.
 
-## Why NAR
+## The result
 
-| | |
-|---|---|
-| **One key, every provider** | Clients authenticate once. Provider credentials stay server-side and never reach a client, a log, or a repository. |
-| **Model selection that adapts** | `auto` ranks every eligible model by curated quality, capability, and live health, then escalates its latency budget until an answer lands. |
-| **Tools that stay coherent** | Multi-turn tool calling is pinned to the originating model through an encoded affinity token, so a conversation never changes models mid-loop. |
-| **Outages become invisible** | Per-route health tracking, provider failover, and upstream error classification turn provider failures into a slower answer instead of a broken one. |
-| **Provider-agnostic** | Any OpenAI-compatible upstream can be added by declaring it in one table — no changes to routing, protocol, or client code. |
-| **Stateless at the edge** | Shared state lives in Postgres, so the gateway is correct on a cold start and scales across concurrent serverless instances. |
+**1,325+ requests per minute. 24 hours a day. About 44 concurrent agents.**
 
-## Capabilities
+No rate-limit handling, no backoff, no fallback chain, no monitoring. Just completions.
 
-**Text and chat** — `/chat/completions`, `/completions`, `/responses`, `/messages`, with SSE streaming and multi-provider failover.
+---
 
-**Tool calling** — first-class `tools` / `tool_calls` support with legacy `functions` conversion, tolerant recovery of tool calls emitted as text, and affinity pinning across turns.
-
-**Embeddings and retrieval** — `/embeddings`, `/rerank`, and `/search`.
-
-**Images** — `/images/generations`, `/images/edits`, `/images/upscale`.
-
-**Audio** — `/audio/speech`, `/audio/transcriptions`, `/audio/translations`.
-
-**Video and music** — `/videos/generations`, `/music/generations`.
-
-**Analysis** — `/moderations`, `/classify`, `/segment`, `/ocr`, and `/web/fetch`.
-
-**Files and jobs** — `/files` for uploads and `/jobs` for asynchronous work with cancel, retry, and completion callbacks.
-
-**Discovery** — `/models` for the live catalog, `/health` for gateway, storage, and provider status, and `/v1beta/models/{path}` for upstream passthrough.
-
-## Quick start
+## Install
 
 ```bash
-export NAR_BASE="https://your-deployment"
-export NAR_KEY="your-gateway-key"
-
-# health and readiness
-curl -sS "$NAR_BASE/api/v1/health" -H "authorization: Bearer $NAR_KEY"
-
-# the live model catalog
-curl -sS "$NAR_BASE/api/v1/models" -H "authorization: Bearer $NAR_KEY"
-
-# automatic routing
-curl -sS "$NAR_BASE/api/v1/chat/completions" \
-  -H "authorization: Bearer $NAR_KEY" \
-  -H "content-type: application/json" \
-  -d '{"model":"auto","messages":[{"role":"user","content":"Hello"}]}'
-
-# pin a provider, let NAR pick the model
-curl -sS "$NAR_BASE/api/v1/chat/completions" \
-  -H "authorization: Bearer $NAR_KEY" \
-  -H "content-type: application/json" \
-  -d '{"model":"auto/my-provider","messages":[{"role":"user","content":"Hello"}]}'
+npm install @nexuss0781/nar
 ```
 
-Any OpenAI client works by changing the base URL and the API key:
+Zero dependencies. 9.2 kB. Node 18+, Bun, Deno, Cloudflare Workers, Vercel Edge.
 
-```python
-from openai import OpenAI
-
-client = OpenAI(base_url=f"{NAR_BASE}/api/v1", api_key=NAR_KEY)
-client.chat.completions.create(
-    model="auto",
-    messages=[{"role": "user", "content": "Hello"}],
-)
+```bash
+export NAR_API_KEY="<your key>"
 ```
 
-## Routing
+```ts
+import { stream } from "@nexuss0781/nar";
 
-NAR resolves a request through five stages:
+for await (const delta of stream("explain ownership in Rust")) {
+  process.stdout.write(delta);
+}
+```
 
-1. **Scope** — a `provider/model` prefix pins the route exactly; `auto/<provider>` pins the provider and lets NAR choose the model.
-2. **Eligibility** — only models present in the provider catalog with a declared modality are considered.
-3. **Ranking** — eligible models are scored on curated quality tier, capability, and name signals.
-4. **Health** — routes are continuously scored from observed outcomes. A route that struggles is deprioritized, and the pool keeps a probe in flight so it is restored the moment it recovers.
-5. **Failover** — each attempt is recorded, and the next healthy candidate is tried transparently.
+That is the whole integration. There is no client to configure, no provider to
+choose, and no limit to respect.
 
-### Deadline classes
+Already using an OpenAI client? Point its base URL at NAR and it keeps working —
+the wire format is unchanged.
 
-Callers who care about latency can steer how eagerly NAR escalates:
+---
 
-```json
-{ "model": "auto", "routing_class": "agent-fast", "messages": [] }
+## How NAR keeps you off rate limits
+
+This is the core of the product, so it is worth being specific about.
+
+**Budgets are tracked per model, and they refill every minute.** Each model gets
+its own one-minute window, so capacity is continuously available rather than drawn
+from a pool that drains and resets. Nothing is saved up for later, and nothing runs
+out mid-minute.
+
+**Upstream headers are trusted.** Providers that publish remaining-quota headers are
+read directly, so NAR knows what is actually left instead of guessing and
+discovering the answer from a 429. A model that reports zero is held for the
+remainder of its window rather than being tried and failed.
+
+**Rate limits are classified as retryable, not fatal.** A 429, a timeout, or a 5xx
+does not end the request. NAR marks the model, cools it down, and continues to the
+next candidate within the same call. The escalation order is a deadline ladder —
+impatient, balanced, thorough — so a request gets progressively more time and more
+candidates rather than failing early.
+
+**Recovery is automatic.** A probe stays in flight against limited routes, and a
+model is returned to rotation the moment it recovers. Capacity comes back without
+anyone noticing it was gone.
+
+**Tool conversations are pinned.** An agent loop keeps the model it started on, so a
+long multi-turn run does not thrash across a rotating pool and trip limits that
+would never have been hit with a stable route.
+
+The net effect: **your code never sees a 429, never writes a backoff, and never
+needs to know which model is busy.**
+
+---
+
+## Model selection
+
+Three levels of intent:
+
+| You want | Send | Result |
+|---|---|---|
+| The best model available right now | `"auto"` | NAR ranks and picks, then moves on if needed |
+| One source, NAR's choice of model | `"auto/<source>"` | Scoped to that source |
+| Exactly this model | `"<source>/<model-id>"` | Pinned; no silent substitution |
+
+`auto` is the default and the right answer unless you have a specific reason. A
+pinned id that is not currently available returns a clear error rather than quietly
+serving something else.
+
+```ts
+import { models } from "@nexuss0781/nar";
+
+const available = await models();
+```
+
+### Latency control
+
+```ts
+await chat("Ship the checklist", { extra: { routing_class: "agent-fast" } });
 ```
 
 | `routing_class` | Behavior |
 |---|---|
-| `auto` *(default)* | Escalates `fast` → `balanced` → `quality` across successive attempts |
-| `agent-fast` | The impatient tier; answers quickly or fails over fast |
-| `agent-balanced` | Starts at `balanced` before escalating |
-| `quality` | Pins the most reliable, most generous deadline |
+| `auto` *(default)* | Escalates `fast` → `balanced` → `quality` across attempts |
+| `agent-fast` | Short deadline, moves on quickly |
+| `agent-balanced` | Moderate deadline before escalating |
+| `quality` | Full deadline, completeness-first candidates |
 
-The class that actually ran is echoed in `x-omniroute-routing-class`. Tool-result continuations always run under `quality`, because a complete tool argument matters more than a fast one.
+The class that actually ran is echoed back in `x-omniroute-routing-class`, so you
+can see how much escalation a request needed.
+
+---
 
 ## Tool calling
 
-```json
-{
-  "model": "auto",
-  "messages": [{ "role": "user", "content": "What's the weather in Oslo?" }],
-  "tools": [{
-    "type": "function",
-    "function": {
-      "name": "get_weather",
-      "parameters": {
-        "type": "object",
-        "properties": { "city": { "type": "string" } },
-        "required": ["city"]
-      }
-    }
-  }]
+```ts
+import { chat } from "@nexuss0781/nar";
+
+const tools = [{
+  type: "function",
+  function: {
+    name: "get_weather",
+    description: "Current weather for a city",
+    parameters: {
+      type: "object",
+      properties: { city: { type: "string" } },
+      required: ["city"],
+    },
+  },
+}];
+
+const messages = [{ role: "user", content: "Weather in Oslo, then summarise it." }];
+
+for (let turn = 0; turn < 6; turn++) {
+  const r = await chat("", { messages, tools, toolChoice: "auto" });
+
+  if (r.finishReason !== "tool_calls") {
+    console.log(r.text);
+    break;
+  }
+
+  messages.push({ role: "assistant", content: r.text, tool_calls: r.toolCalls });
+
+  for (const call of r.toolCalls) {
+    const result = await runTool(call.function.name, JSON.parse(call.function.arguments));
+    messages.push({
+      role: "tool",
+      tool_call_id: call.id,
+      content: typeof result === "string" ? result : JSON.stringify(result),
+    });
+  }
 }
 ```
 
-NAR normalizes the tool protocol on the way in and on the way out, so clients may use either the modern `tools` shape or the legacy `functions` shape. Each returned tool call carries an encoded affinity token; echoing the conversation back lets NAR resume on the same model, keeping a long agent loop coherent. Providers are ranked for tool reliability from observed success, so the route that actually completes tool calls is the one that leads.
+`toolCalls` and `finishReason` come back identically from `chat`, `complete`, and
+`streamEvents`, so the same loop works streamed or not. Argument fragments split
+across stream chunks are already rejoined for you.
+
+`tool_choice` is enforced by NAR rather than delegated: `"none"` withholds the tool
+schema entirely, so the guarantee holds the same on every route instead of
+depending on which one served the turn.
+
+---
+
+## API
+
+Six calls, each with one job:
+
+| Call | Returns | Use for |
+|---|---|---|
+| `stream(prompt, opts)` | `AsyncGenerator<string>` | Text as it arrives |
+| `streamEvents(prompt, opts)` | `AsyncGenerator<StreamEvent>` | Streaming you also need tool calls from |
+| `chat(prompt, opts)` | `ChatResult` | The normal choice |
+| `complete(prompt, opts)` | `ChatResult` | Non-streaming, reports `usage` |
+| `models(opts)` | `string[]` | What is available right now |
+| `health(opts)` | `{ status, ready, checks[] }` | Uptime and auth diagnosis |
+
+```ts
+const r = await chat("Summarise this changelog", { maxTokens: 400 });
+
+r.text;            // the answer
+r.route.provider;  // which source served it
+r.route.model;     // which model served it
+r.finishReason;    // "stop" | "tool_calls" | "length"
+r.toolCalls;       // [] when it answered with text
+r.usage;           // populated by complete()
+```
+
+Options: `model`, `system`, `temperature`, `maxTokens`, `tools`, `toolChoice`,
+`messages`, `extra`, `baseUrl`, `apiKey`, `signal`. `prompt` is optional, so a
+continuation turn can be `chat("", { messages })`.
+
+### Errors
+
+Every failure throws `NarError` with `status`, `code`, `route`, and `body`. Because
+NAR fails over internally, an error means the request itself is the problem.
+
+| Status | Meaning | Do |
+|---|---|---|
+| 401 `invalid_api_key` | Bad or missing key | Fix the key |
+| 403 `model_not_allowed` | Key scoped away from that model | Use an allowed model |
+| 429 `rate_limited` | Your key's own budget | Back off briefly |
+| 503 `provider_unavailable` | Every candidate was unavailable | Retry once or twice |
+| 503 `model_not_found` | Pinned id is not available | Re-read `models()` |
+
+Note what is absent: there is no "this model is busy" error to handle, because
+being busy is NAR's problem to solve, not yours.
+
+---
 
 ## Observability
 
-Every response carries routing telemetry, so you can see exactly what happened without reading server logs:
+| Header | Meaning | Present |
+|---|---|---|
+| `x-omniroute-provider` | Which source served the request | always |
+| `x-omniroute-model` | Which model served it | always |
+| `x-omniroute-routing-class` | Deadline class applied | always |
+| `x-omniroute-tool-protocol` | Normalized tool protocol in use | tool requests |
+| `x-omniroute-tool-affinity` | Token to echo back next turn | tool requests |
+| `x-omniroute-attempt-trail` | Every route tried, with status | failures |
+| `x-omniroute-failure-codes` | Why each was rejected, in order | failures |
 
-| Header | Meaning |
-|---|---|
-| `x-omniroute-provider` | Provider that served the request |
-| `x-omniroute-model` | Model as requested, provider-qualified |
-| `x-omniroute-routing-class` | Deadline class applied: `fast`, `balanced`, or `quality` |
-| `x-omniroute-attempt-trail` | Ordered `provider/model:status` list of every attempt |
-| `x-omniroute-failure-codes` | Failure codes from those attempts, in order |
-| `x-omniroute-tool-protocol` | Normalized tool protocol in use |
-| `x-omniroute-tool-affinity` | Affinity token to echo back on the next turn |
-| `x-omniroute-execution` | Which runtime executed the request |
-| `x-omniroute-render-forwarded` | Present when served by the long-lived runtime |
+`x-omniroute-attempt-trail` is the one worth logging: it turns an opaque failure
+into the full list of candidates and why each one was skipped.
 
-`/api/v1/health` reports gateway readiness, storage connectivity, per-provider model counts, and failover state in one payload.
+```ts
+import { health } from "@nexuss0781/nar";
+
+const h = await health();   // unauthenticated, safe for uptime checks
+```
+
+Health reports gateway readiness, storage, and a per-provider auth probe — the
+fastest way to separate "something is wrong with NAR" from "one credential needs
+attention".
+
+---
 
 ## Configuration
 
-Client applications need exactly one credential: the gateway key. Provider keys stay server-side.
+Clients hold one credential. Everything else stays server-side.
 
 | Variable | Purpose |
 |---|---|
-| `OMNIROUTE_AI_API_KEY` | The single key clients authenticate with |
-| `OMNIROUTE_<PROVIDER>_API_KEY` | Server-side credential for a provider |
-| `OMNIROUTE_<PROVIDER>_BASE_URL` | Override a provider's base URL |
-| `OMNIROUTE_<PROVIDER>_MODELS` | Override a provider's model list |
-| `OMNIROUTE_AI_PROVIDER_ID` / `_BASE_URL` / `_API_KEY` / `_FORMAT` / `_MODELS` | Generic single-provider path |
-| `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` | Policy, usage, and shared-state storage |
+| `OMNIROUTE_AI_API_KEY` | The key clients authenticate with |
+| `OMNIROUTE_<PROVIDER>_API_KEY` | Server-side credential for a source |
+| `OMNIROUTE_<PROVIDER>_BASE_URL` | Override a source's base URL |
+| `OMNIROUTE_<PROVIDER>_MODELS` | Override its model list |
+| `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` | Policy, usage, shared state |
 | `RENDER_SERVICE_URL`, `RENDER_INTERNAL_SECRET` | Long-lived failover runtime |
 
-### Adding a provider
+### Rotating the key
 
-Providers are declared in one table. Add an entry and NAR picks it up everywhere — catalog, eligibility, ranking, failover, and the health endpoint:
+`OMNIROUTE_AI_API_KEY` accepts a comma-separated list, so rotation needs no
+downtime and no coordinated client deploy:
+
+```text
+1. Set it to "<old key>,<new key>" and redeploy. Both work.
+2. Move clients to the new key.
+3. Remove the old key and redeploy.
+```
+
+Every candidate is compared without an early exit, so a match never reveals its
+position in the list through response timing.
+
+### Adding a source
+
+One table entry, and NAR picks it up everywhere — catalog, ranking, failover, and
+health. No changes to routing, protocol, or client code:
 
 ```ts
 {
-  id: "my-provider",
-  baseUrl: "https://api.my-provider.com/v1",
-  apiKey: "",
+  id: "my-source",
+  baseUrl: "https://api.example.com/v1",
   format: "openai",
   priority: 980,
   models: ["my-model"],
 }
 ```
 
-Supply the credential through `OMNIROUTE_MY_PROVIDER_API_KEY`, then curate the model's modality and quality in `modelMetadata.ts` so it is eligible for automatic routing. Any OpenAI-compatible upstream works without further changes.
+Then curate the model's capability and quality in `modelMetadata.ts` so it becomes
+eligible for automatic routing.
+
+---
 
 ## Architecture
 
 ```
-OpenAI client ──Bearer gateway key──► NAR (Next.js route handlers)
-                                        │
-                                        ├─ authentication + policy
-                                        ├─ candidate pool  (catalog ∩ capability ∩ health)
-                                        ├─ tool affinity decode ─► preferred route
-                                        ├─ attempt loop ──► upstream provider
-                                        │     └─ response classification + stream preflight
-                                        └─ long-lived runtime failover
+client ──Bearer key──► NAR
+                        │
+                        ├─ authentication + policy
+                        ├─ rate limiting (per source, per model)
+                        ├─ candidate pool  (catalog ∩ capability ∩ health)
+                        ├─ tool affinity ──► preferred model
+                        ├─ attempt loop ──► upstream
+                        │     └─ classification + retry decisions
+                        └─ long-lived runtime failover
 ```
 
-The gateway is stateless at the edge: shared state lives in Postgres, so correctness never depends on a warm instance and concurrency is unbounded. The optional long-lived runtime (`render/server.mjs`) handles stateful work and acts as a failover target, with health-gated forwarding that cannot loop back.
+Stateless at the edge, with shared state in Postgres — correct on a cold start and
+correct across concurrent instances. Adding capacity means adding instances; it
+does not mean re-architecting.
 
-### Repository layout
-
-```
-src/app/api/                     route handlers, one directory per endpoint
-src/lib/vercel-ai-gateway/
-  gateway.ts                     provider assembly, ranking, failover, streaming
-  toolProtocol.ts                tool normalization and affinity encoding
-  routeHealth.ts                 per-route health scoring and telemetry
-  upstreamResponse.ts            response classification and stream preflight
-  modelMetadata.ts               curated capability and quality rows
-  repositories.ts                shared-state persistence
-src/lib/vercel-parad/            request-scoped persistence helpers
-src/lib/aiRoute.ts               edge wrapper and failover
-render/server.mjs                long-lived runtime
-scripts/                         smoke test and migrations
-docs/                            architecture notes
-```
+---
 
 ## Development
 
@@ -237,17 +339,32 @@ npm run smoke -- "$NAR_BASE"   # endpoint smoke test
 npm run render:start   # long-lived runtime
 ```
 
-Requires Node.js 22.22.2 or newer.
+Node.js 22.22.2 or newer. The SDK is a separate package:
+
+```bash
+cd sdk
+npm install
+npm run build          # emit dist/ with declarations
+npm run typecheck
+```
+
+---
 
 ## Documentation
 
-- [Provider & Model Admission Criteria](CRITERIA.md) — the standard every provider and model is measured against
-- [Contributing to Nexuss AI Router](CONTRIBUTING.md) — submit a free model provider or improve the gateway
+- [Agent Skill](SKILL/SKILL.md) — instructions for agents driving the gateway
+- [Provider & Model Admission Criteria](CRITERIA.md) — the standard each source is measured against
+- [Contributing](CONTRIBUTING.md) — add a source or improve the gateway
 - [Low-Latency Architecture](docs/LOW_LATENCY_ARCHITECTURE.md) — request lifecycle and latency design
 - [Low-Latency Implementation](docs/LOW_LATENCY_IMPLEMENTATION.md) — the implementation record
 - [Render Runtime](render/README.md) — long-lived runtime and failover
-- [Agent Skill](SKILL/SKILL.md) — instructions for agents driving the gateway
 
 ## Contributing
 
-NAR accepts free-tier model providers into its routing network. Start with the [contributing guide](CONTRIBUTING.md); the [admission criteria](CRITERIA.md) define what a provider and each of its models must satisfy, how they are verified, and how they are reviewed over time.
+NAR accepts new model sources into its pool. Start with the
+[contributing guide](CONTRIBUTING.md); the [admission criteria](CRITERIA.md) define
+what a source and each of its models must satisfy and how they are verified.
+
+## License
+
+MIT.
