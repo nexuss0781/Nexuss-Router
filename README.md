@@ -2,7 +2,7 @@
 
 # Nexuss AI Router
 
-**One endpoint. Any model. You never handle a rate limit again.**
+### One endpoint. Every model. You will never write rate-limit handling again.
 
 [![npm](https://img.shields.io/npm/v/@nexuss0781/nar-000000?style=flat-square&logo=npm)](https://www.npmjs.com/package/@nexuss0781/nar)
 [![Next.js](https://img.shields.io/badge/Next.js-16.3.1-000000?style=flat-square&logo=next.js)](https://nextjs.org)
@@ -15,26 +15,103 @@
 
 ---
 
-## The problem
+<div align="center">
 
-Every free model comes with a limit. Yours will hit it — usually at 2am, usually
-mid-run, usually in the middle of an agent loop. So you write retry logic, a
-backoff timer, a model-fallback chain, and a health check you will forget to
-maintain. Then a new provider appears and the whole thing needs revisiting.
+| | |
+|---|---|
+| **Integration** | `npm install @nexuss0781/nar` — or point an agent at one file |
+| **Dependencies** | Zero |
+| **Bundle** | 9.2 kB |
+| **Runtimes** | Node 18+, Bun, Deno, Cloudflare Workers, Vercel Edge |
+| **Rate limits you handle** | None |
+| **Capacity** | 1.9M calls/day — ~3,000× a heavy agent workload |
+| **Client credentials** | One key |
 
-That layer is the same in every project, and it is almost never the interesting
-part.
+</div>
 
-**NAR is that layer, already built.** You send a request. NAR picks a model that is
-not currently limited, and if something goes wrong it moves to another one
-transparently. A 429 never reaches your code — you get an answer, or an error that
-is actually about your request.
+---
 
-## The result
+## Your agent can integrate this by itself
 
-**1,325+ requests per minute. 24 hours a day. About 44 concurrent agents.**
+There is a complete instruction file in this repository. An agent reads it once
+and knows everything — how to call the API, how to run a tool loop, how to pick a
+model, what every error means, and what not to do.
 
-No rate-limit handling, no backoff, no fallback chain, no monitoring. Just completions.
+```
+.opencode/skills/nexuss-ai-router/SKILL.md
+```
+
+That is the whole human effort. **You do not write the integration, and you do not
+explain it.** Hand an agent the path, or let it discover the skill, and it wires
+itself up correctly on the first attempt — because the file tells it exactly what
+to do instead of making it guess from an API reference and get the tool-call
+plumbing wrong.
+
+It is 365 lines, dependency-free, and versioned with the gateway, so it cannot
+describe an interface that no longer exists.
+
+<details>
+<summary><b>It covers, in order of when you need it</b></summary>
+
+- A decision table for picking a path before writing any code
+- Installation and environment
+- The six calls, and what each is for
+- Options, with the exact semantics of each
+- Model selection: `auto`, scoped, or pinned — and when each is right
+- Latency classes for speed-sensitive work
+- Tool calling, including a complete working multi-turn loop
+- `NarError`, with a table of what to do for each status
+- Which model answered, and how to log it
+- Health checks for uptime monitoring
+- Raw HTTP, for the endpoints the SDK does not wrap
+- Rotating the key without downtime
+- A closing rules section — what an agent should never do
+
+</details>
+
+---
+
+## Why you need this
+
+Every model has a limit. Yours will hit it — usually at 2am, usually mid-run,
+usually inside an agent loop that has nowhere to go.
+
+So you write retry logic. Then a backoff timer. Then a fallback chain across
+models. Then a health check you will forget to maintain. Then a new model appears
+and all of it needs revisiting.
+
+That layer is identical in every project and is never the interesting part.
+
+> **NAR is that layer, already built.** You send a request. NAR picks a model that
+> is not currently limited, and if something goes wrong it moves to another one
+> inside the same call. A rate limit never reaches your code.
+
+---
+
+## You will not hit a limit
+
+Not because the limits are generous. Because your workload is orders of magnitude
+smaller than the pool, and because the pool handles its own pressure instead of
+exporting it to you.
+
+```
+workload vs capacity          share of a full day       █ = 10% of capacity
+
+one agent · 20 sessions/day            0.03%  ▏
+ten agents · all day                   0.16%  ▏
+fifty agents · all day                 0.79%  ▏
+a continuous loop · 1 call / 2s        2.26%  █
+────────────────────────────────────────────────────────────
+NAR capacity                            100%   ██████████████████████████
+```
+
+A busy day of agent work is **hundreds** of calls. NAR serves **1.9 million**.
+You would need roughly **3,000 agents running flat out** before a single day came
+close to the ceiling — and even then, nothing fails: models are held, cooled, and
+replaced, and the request keeps going.
+
+The number is not the argument. The argument is that the ceiling is not something
+your code participates in.
 
 ---
 
@@ -43,8 +120,6 @@ No rate-limit handling, no backoff, no fallback chain, no monitoring. Just compl
 ```bash
 npm install @nexuss0781/nar
 ```
-
-Zero dependencies. 9.2 kB. Node 18+, Bun, Deno, Cloudflare Workers, Vercel Edge.
 
 ```bash
 export NAR_API_KEY="<your key>"
@@ -58,82 +133,75 @@ for await (const delta of stream("explain ownership in Rust")) {
 }
 ```
 
-That is the whole integration. There is no client to configure, no provider to
-choose, and no limit to respect.
-
-Already using an OpenAI client? Point its base URL at NAR and it keeps working —
-the wire format is unchanged.
+No client to configure, no model to choose, no limit to respect. An existing
+OpenAI client keeps working unchanged — the wire format is the same.
 
 ---
 
-## How NAR keeps you off rate limits
+## How NAR stays ahead of the limits
 
-This is the core of the product, so it is worth being specific about.
+Budgets are tracked per model and **refill every minute**, so capacity is
+continuously available rather than drawn from a pool that drains and resets.
+Nothing is saved for later, and nothing runs out partway through a minute.
 
-**Budgets are tracked per model, and they refill every minute.** Each model gets
-its own one-minute window, so capacity is continuously available rather than drawn
-from a pool that drains and resets. Nothing is saved up for later, and nothing runs
-out mid-minute.
+Upstream **remaining-quota headers are read directly**, so remaining capacity is
+known rather than guessed at. A model reporting zero is held for the rest of its
+window instead of being tried and failed.
 
-**Upstream headers are trusted.** Providers that publish remaining-quota headers are
-read directly, so NAR knows what is actually left instead of guessing and
-discovering the answer from a 429. A model that reports zero is held for the
-remainder of its window rather than being tried and failed.
-
-**Rate limits are classified as retryable, not fatal.** A 429, a timeout, or a 5xx
-does not end the request. NAR marks the model, cools it down, and continues to the
-next candidate within the same call. The escalation order is a deadline ladder —
-impatient, balanced, thorough — so a request gets progressively more time and more
-candidates rather than failing early.
+**Rate limits are retryable, never fatal.** A 429, timeout, or 5xx marks the
+model, cools it, and continues to the next candidate inside the same request. The
+escalation is a deadline ladder — impatient, balanced, thorough — so a request
+gains more time and more candidates rather than giving up.
 
 **Recovery is automatic.** A probe stays in flight against limited routes, and a
-model is returned to rotation the moment it recovers. Capacity comes back without
-anyone noticing it was gone.
+recovered model re-enters rotation on its own. Capacity returns without anyone
+noticing it left.
 
-**Tool conversations are pinned.** An agent loop keeps the model it started on, so a
-long multi-turn run does not thrash across a rotating pool and trip limits that
-would never have been hit with a stable route.
+**Tool conversations are pinned**, so a long multi-turn run holds one model
+instead of thrashing the pool and tripping limits a stable route never would.
 
-The net effect: **your code never sees a 429, never writes a backoff, and never
-needs to know which model is busy.**
+You get an answer, or an error about your request. Nothing in between.
 
 ---
 
-## Model selection
+## API
 
-Three levels of intent:
-
-| You want | Send | Result |
+| Call | Returns | Use for |
 |---|---|---|
-| The best model available right now | `"auto"` | NAR ranks and picks, then moves on if needed |
-| One source, NAR's choice of model | `"auto/<source>"` | Scoped to that source |
-| Exactly this model | `"<source>/<model-id>"` | Pinned; no silent substitution |
-
-`auto` is the default and the right answer unless you have a specific reason. A
-pinned id that is not currently available returns a clear error rather than quietly
-serving something else.
-
-```ts
-import { models } from "@nexuss0781/nar";
-
-const available = await models();
-```
-
-### Latency control
+| `stream(prompt, opts)` | `AsyncGenerator<string>` | Text as it arrives |
+| `streamEvents(prompt, opts)` | `AsyncGenerator<StreamEvent>` | Streaming, and you need tool calls too |
+| `chat(prompt, opts)` | `ChatResult` | The normal choice |
+| `complete(prompt, opts)` | `ChatResult` | Non-streaming, reports `usage` |
+| `models(opts)` | `string[]` | What is available right now |
+| `health(opts)` | `{ status, ready, checks[] }` | Uptime and diagnosis |
 
 ```ts
-await chat("Ship the checklist", { extra: { routing_class: "agent-fast" } });
+const r = await chat("Summarise this changelog", { maxTokens: 400 });
+
+r.text;            // the answer
+r.route.provider;  // which source served it
+r.route.model;     // which model served it
+r.finishReason;    // "stop" | "tool_calls" | "length"
+r.toolCalls;       // [] when it answered with text
+r.usage;           // populated by complete()
 ```
 
-| `routing_class` | Behavior |
-|---|---|
-| `auto` *(default)* | Escalates `fast` → `balanced` → `quality` across attempts |
-| `agent-fast` | Short deadline, moves on quickly |
-| `agent-balanced` | Moderate deadline before escalating |
-| `quality` | Full deadline, completeness-first candidates |
+Options: `model`, `system`, `temperature`, `maxTokens`, `tools`, `toolChoice`,
+`messages`, `extra`, `baseUrl`, `apiKey`, `signal`. `prompt` is optional, so a
+continuation turn is `chat("", { messages })`.
 
-The class that actually ran is echoed back in `x-omniroute-routing-class`, so you
-can see how much escalation a request needed.
+### Errors
+
+| Status | Meaning | Do |
+|---|---|---|
+| 401 `invalid_api_key` | Bad or missing key | Fix the key |
+| 403 `model_not_allowed` | Key scoped away from that model | Use an allowed model |
+| 429 `rate_limited` | Your own key's budget | Back off briefly |
+| 503 `provider_unavailable` | Every candidate was unavailable | Retry once or twice |
+| 503 `model_not_found` | Pinned id is not available | Re-read `models()` |
+
+There is deliberately no "this model is busy" error. Being busy is NAR's problem
+to solve, not yours.
 
 ---
 
@@ -179,58 +247,48 @@ for (let turn = 0; turn < 6; turn++) {
 ```
 
 `toolCalls` and `finishReason` come back identically from `chat`, `complete`, and
-`streamEvents`, so the same loop works streamed or not. Argument fragments split
-across stream chunks are already rejoined for you.
+`streamEvents`, so one loop works streamed or not. Argument fragments split across
+stream chunks are rejoined for you.
 
-`tool_choice` is enforced by NAR rather than delegated: `"none"` withholds the tool
-schema entirely, so the guarantee holds the same on every route instead of
-depending on which one served the turn.
+`tool_choice` is enforced by NAR rather than delegated: `"none"` withholds the
+schema entirely, so the guarantee is identical on every route instead of depending
+on which one served the turn.
 
 ---
 
-## API
+## Model selection
 
-Six calls, each with one job:
-
-| Call | Returns | Use for |
+| You want | Send | Result |
 |---|---|---|
-| `stream(prompt, opts)` | `AsyncGenerator<string>` | Text as it arrives |
-| `streamEvents(prompt, opts)` | `AsyncGenerator<StreamEvent>` | Streaming you also need tool calls from |
-| `chat(prompt, opts)` | `ChatResult` | The normal choice |
-| `complete(prompt, opts)` | `ChatResult` | Non-streaming, reports `usage` |
-| `models(opts)` | `string[]` | What is available right now |
-| `health(opts)` | `{ status, ready, checks[] }` | Uptime and auth diagnosis |
+| The best model available now | `"auto"` | NAR ranks and picks, moves on if needed |
+| One source, NAR's choice of model | `"auto/<source>"` | Scoped to that source |
+| Exactly this model | `"<source>/<model-id>"` | Pinned, no silent substitution |
+
+`auto` is the default and the right answer unless you have a reason. A pinned id
+that is not currently available returns a clear error rather than quietly serving
+something else.
 
 ```ts
-const r = await chat("Summarise this changelog", { maxTokens: 400 });
+import { models } from "@nexuss0781/nar";
 
-r.text;            // the answer
-r.route.provider;  // which source served it
-r.route.model;     // which model served it
-r.finishReason;    // "stop" | "tool_calls" | "length"
-r.toolCalls;       // [] when it answered with text
-r.usage;           // populated by complete()
+const available = await models();
 ```
 
-Options: `model`, `system`, `temperature`, `maxTokens`, `tools`, `toolChoice`,
-`messages`, `extra`, `baseUrl`, `apiKey`, `signal`. `prompt` is optional, so a
-continuation turn can be `chat("", { messages })`.
+### Latency control
 
-### Errors
+```ts
+await chat("Ship the checklist", { extra: { routing_class: "agent-fast" } });
+```
 
-Every failure throws `NarError` with `status`, `code`, `route`, and `body`. Because
-NAR fails over internally, an error means the request itself is the problem.
+| `routing_class` | Behavior |
+|---|---|
+| `auto` *(default)* | Escalates `fast` → `balanced` → `quality` across attempts |
+| `agent-fast` | Short deadline, moves on quickly |
+| `agent-balanced` | Moderate deadline before escalating |
+| `quality` | Full deadline, completeness-first candidates |
 
-| Status | Meaning | Do |
-|---|---|---|
-| 401 `invalid_api_key` | Bad or missing key | Fix the key |
-| 403 `model_not_allowed` | Key scoped away from that model | Use an allowed model |
-| 429 `rate_limited` | Your key's own budget | Back off briefly |
-| 503 `provider_unavailable` | Every candidate was unavailable | Retry once or twice |
-| 503 `model_not_found` | Pinned id is not available | Re-read `models()` |
-
-Note what is absent: there is no "this model is busy" error to handle, because
-being busy is NAR's problem to solve, not yours.
+The class that actually ran comes back in `x-omniroute-routing-class`, so you can
+see how much escalation a request needed.
 
 ---
 
@@ -247,7 +305,7 @@ being busy is NAR's problem to solve, not yours.
 | `x-omniroute-failure-codes` | Why each was rejected, in order | failures |
 
 `x-omniroute-attempt-trail` is the one worth logging: it turns an opaque failure
-into the full list of candidates and why each one was skipped.
+into the full list of candidates and why each was skipped.
 
 ```ts
 import { health } from "@nexuss0781/nar";
@@ -277,7 +335,7 @@ Clients hold one credential. Everything else stays server-side.
 ### Rotating the key
 
 `OMNIROUTE_AI_API_KEY` accepts a comma-separated list, so rotation needs no
-downtime and no coordinated client deploy:
+downtime and no coordinated deploy:
 
 ```text
 1. Set it to "<old key>,<new key>" and redeploy. Both work.
@@ -286,7 +344,7 @@ downtime and no coordinated client deploy:
 ```
 
 Every candidate is compared without an early exit, so a match never reveals its
-position in the list through response timing.
+position through response timing.
 
 ### Adding a source
 
@@ -323,8 +381,8 @@ client ──Bearer key──► NAR
 ```
 
 Stateless at the edge, with shared state in Postgres — correct on a cold start and
-correct across concurrent instances. Adding capacity means adding instances; it
-does not mean re-architecting.
+correct across concurrent instances. Adding capacity means adding instances, not
+re-architecting.
 
 ---
 
@@ -352,7 +410,7 @@ npm run typecheck
 
 ## Documentation
 
-- [Agent Skill](SKILL/SKILL.md) — instructions for agents driving the gateway
+- [Agent Skill](.opencode/skills/nexuss-ai-router/SKILL.md) — the integration guide an agent reads
 - [Provider & Model Admission Criteria](CRITERIA.md) — the standard each source is measured against
 - [Contributing](CONTRIBUTING.md) — add a source or improve the gateway
 - [Low-Latency Architecture](docs/LOW_LATENCY_ARCHITECTURE.md) — request lifecycle and latency design

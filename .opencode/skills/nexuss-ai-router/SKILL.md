@@ -1,6 +1,6 @@
 ---
 name: nexuss-ai-router
-description: Use Nexuss AI Router (NAR) as the single AI inference endpoint, via the @nexuss0781/nar npm SDK or raw HTTP. Apply when an agent needs free LLM inference, model discovery, Auto routing, SSE streaming, or tool-calling loops, and when the task mentions nar-client, @nexuss0781/nar, OMNIROUTE_API_BASE, omniroute, x-omniroute-provider, or a Nexuss AI Router domain or API base.
+description: Use Nexuss AI Router (NAR) as the single AI inference endpoint, via the @nexuss0781/nar npm SDK or raw HTTP. Apply when an agent needs LLM inference, model discovery, Auto routing, SSE streaming, or tool-calling loops, and when the task mentions @nexuss0781/nar, NAR_API_KEY, NAR_BASE_URL, OMNIROUTE_AI_API_KEY, omniroute, x-omniroute-provider, or a Nexuss AI Router deployment.
 ---
 
 # Nexuss AI Router (NAR) — AI Inference
