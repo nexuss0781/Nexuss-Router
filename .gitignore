@@ -2,6 +2,7 @@
 .next
 node_modules
 .env*
+!.env.example
 *.log
 tsconfig.tsbuildinfo
 PRIVATE*.md
