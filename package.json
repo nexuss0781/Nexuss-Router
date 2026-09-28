@@ -4,6 +4,7 @@
   "private": true,
   "description": "Nexuss AI Router (NAR) - an OpenAI-compatible multi-provider AI gateway with dynamic model routing, tool-call affinity, and health-aware failover.",
   "scripts": {
+    "dev": "next dev",
     "build": "next build",
     "start": "next start",
     "render:start": "node render/server.mjs",
