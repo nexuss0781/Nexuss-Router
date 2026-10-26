@@ -97,6 +97,7 @@ import {
   consumeRateLimit,
   isRateLimitExhausted,
   noteRateLimitRejected,
+  reserveRateLimitRequest,
 } from "./rate-limit";
 
 // A published 429 means the request counted against the budget even though it did not
@@ -698,6 +699,7 @@ export async function handleAiOnlyJsonEndpoint(
     const timeout = setTimeout(() => controller.abort(), MAX_PROVIDER_TIMEOUT_MS);
     const startedAt = Date.now();
     try {
+      reserveRateLimitRequest(provider, model);
       const upstream = await fetch(upstreamUrl, { method: "POST", headers: upstreamHeaders(provider), body: JSON.stringify(upstreamBody), signal: controller.signal });
       if (options.streamResponse || body.stream === true) {
         if (!upstream.ok) {
@@ -1191,10 +1193,11 @@ export async function handleAiOnlyChatCompletions(request: Request, dependencies
       // instead of failing out with no attempt at all. Tool workflows get one
       // probe per route, otherwise a single leading route would consume the only
       // bypass and starve a healthy model of the same provider further down.
-      // A spent published budget joins the same pool: the point of a limit here is
-      // to fall through to the next model, not to fail the request on this one.
-      if ((coolingDown || rateLimited) && (cooldownBypassRoutes.has(modelRouteKey(provider, model)) || (!wantsTools && (attemptedAny || cooldownBypassUsed)))) continue;
-      if (coolingDown || rateLimited) {
+      // A published request budget is a hard ceiling, not a cooldown probe: skip it
+      // and continue to another model/provider rather than spend beyond the allowance.
+      if (rateLimited) continue;
+      if (coolingDown && (cooldownBypassRoutes.has(modelRouteKey(provider, model)) || (!wantsTools && (attemptedAny || cooldownBypassUsed)))) continue;
+      if (coolingDown) {
         cooldownBypassRoutes.add(modelRouteKey(provider, model));
         if (!wantsTools) cooldownBypassUsed = true;
       }
@@ -1224,6 +1227,7 @@ export async function handleAiOnlyChatCompletions(request: Request, dependencies
       try {
           const floored = withMaxTokensFloor(requestBody, upstreamModel);
           const upstreamBody = provider.id === MISTRAL_PROVIDER_ID ? normalizeMistralParams(floored.body) : floored.body;
+          reserveRateLimitRequest(provider, model);
           const upstream = provider.id === PUTER_PROVIDER_ID
             ? await puterChatCompletion({ ...upstreamBody, model: upstreamModel }, upstreamModel, controller.signal)
             : await fetch(endpoint, {
@@ -1262,7 +1266,6 @@ export async function handleAiOnlyChatCompletions(request: Request, dependencies
           }
           noteProviderSuccess(provider, model);
           applyUpstreamRateLimitHeaders(provider, model, upstream.headers);
-          consumeRateLimit(provider, model);
           if (wantsTools) noteToolResult(provider, model, true);
           const sourceStream = toolWorkflow ? canonicalizeToolCallStream(preflight.stream, route) : preflight.stream;
           const stream = streamWithUsage(sourceStream, () => void recordUsage(provider, model, "chat.completions", "succeeded", {}, policy, startedAt, dependencies));

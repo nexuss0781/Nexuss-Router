@@ -395,6 +395,7 @@ Clients hold one credential. Everything else stays server-side.
 | `OMNIROUTE_<PROVIDER>_API_KEY` | Server-side credential for a source |
 | `OMNIROUTE_<PROVIDER>_BASE_URL` | Override a source's base URL |
 | `OMNIROUTE_<PROVIDER>_MODELS` | Override its model list |
+| `OMNIROUTE_RATE_LIMITS_JSON` | Override account-wide and per-model request/token budgets |
 | `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` | Policy, usage, shared state |
 | `RENDER_SERVICE_URL`, `RENDER_INTERNAL_SECRET` | Long-lived failover runtime |
 
@@ -412,6 +413,21 @@ as `orcarouter/deepseek/deepseek-v4-flash-free`,
 `orcarouter/tencent/hy4-preview-free`, and
 `orcarouter/z-ai/glm-5.3-flash-free`. The endpoint and list can be overridden
 with `OMNIROUTE_ORCAROUTER_BASE_URL` and `OMNIROUTE_ORCAROUTER_MODELS`.
+
+The built-in free-account ceilings are 60 requests/minute and 1,800/hour for
+TokenHarbor, and 10/minute plus 50/day for OrcaRouter. OrcaRouter also has model
+ceilings of 50/minute and 250/day for `tencent/hy4-preview-free`, and 5/minute
+and 50/day for `orca/orcaverify-text1.0-free`; both the account and model windows
+are enforced. To tune them, set `OMNIROUTE_RATE_LIMITS_JSON` to an object with
+`providers` (account-wide) and/or `models` (model-specific) maps. Omitted fields
+keep their defaults. The free-tier caps can be lowered, but zero or values above
+the published TokenHarbor/OrcaRouter maxima are ignored. Model keys are the
+upstream IDs without the NAR provider prefix. `.env.example` contains a complete
+example.
+
+These counters are process-local, like the existing in-memory route limiter. In a
+multi-instance deployment each runtime enforces its own counters; a shared-store
+implementation would be needed for a strict aggregate cap across all instances.
 
 ### Rotating the key
 

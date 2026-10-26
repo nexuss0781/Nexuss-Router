@@ -9,6 +9,7 @@
     "start": "next start",
     "render:start": "node render/server.mjs",
     "db:migrate": "node scripts/migrate-supabase.mjs",
+    "test:rate-limit": "node --experimental-strip-types --test scripts/rate-limit.test.mjs",
     "smoke": "bash scripts/live-smoke.sh"
   },
   "dependencies": {
