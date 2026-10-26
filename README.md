@@ -43,7 +43,7 @@ a URL like `https://nar-abc123.vercel.app`.
 | Variable | Value |
 |---|---|
 | `OMNIROUTE_AI_API_KEY` | Any random string you invent |
-| *one* source credential | `OMNIROUTE_PUTER_TOKEN`, or a free key from any source in [`.env.example`](.env.example) |
+| *one* source credential | `OMNIROUTE_TOKENHARBOR_API_KEY`, `OMNIROUTE_PUTER_TOKEN`, or a free key from any source in [`.env.example`](.env.example) |
 
 Redeploy. That is the entire configuration — [`.env.example`](.env.example)
 lists every optional variable and what it changes.
@@ -397,6 +397,21 @@ Clients hold one credential. Everything else stays server-side.
 | `OMNIROUTE_<PROVIDER>_MODELS` | Override its model list |
 | `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` | Policy, usage, shared state |
 | `RENDER_SERVICE_URL`, `RENDER_INTERNAL_SECRET` | Long-lived failover runtime |
+
+For TokenHarbor, add `OMNIROUTE_TOKENHARBOR_API_KEY` to the Vercel project and
+redeploy. NAR registers the verified models as `tokenharbor/deepseek-v4.1-flash:free`,
+`tokenharbor/deepseek-v4-flash:free`, `tokenharbor/mimo-v2.6-flash:free`, and
+`tokenharbor/mimo-v2.5:free`. It uses `https://tokenharbor.ai/v1` by default;
+`OMNIROUTE_TOKENHARBOR_BASE_URL` and `OMNIROUTE_TOKENHARBOR_MODELS` are optional.
+
+For OrcaRouter, add `OMNIROUTE_ORCAROUTER_API_KEY` and redeploy. NAR uses
+`https://api.orcarouter.ai/v1` by default and exposes the six direct free models
+as `orcarouter/deepseek/deepseek-v4-flash-free`,
+`orcarouter/deepseek/deepseek-v4.1-flash-free`,
+`orcarouter/orca/orcaverify-text1.0-free`, `orcarouter/tencent/hy3-free`,
+`orcarouter/tencent/hy4-preview-free`, and
+`orcarouter/z-ai/glm-5.3-flash-free`. The endpoint and list can be overridden
+with `OMNIROUTE_ORCAROUTER_BASE_URL` and `OMNIROUTE_ORCAROUTER_MODELS`.
 
 ### Rotating the key
 

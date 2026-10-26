@@ -76,6 +76,16 @@ import {
   NVIDIA_PROVIDER_ID,
 } from "./nvidia";
 import {
+  TOKENHARBOR_BASE_URL,
+  TOKENHARBOR_MODELS,
+  TOKENHARBOR_PROVIDER_ID,
+} from "./tokenharbor";
+import {
+  ORCAROUTER_BASE_URL,
+  ORCAROUTER_MODELS,
+  ORCAROUTER_PROVIDER_ID,
+} from "./orcarouter";
+import {
   PUTER_MODELS,
   PUTER_PROVIDER_ID,
   probePuterAuth,
@@ -252,6 +262,27 @@ const BUILTIN_OPTIONAL_PROVIDERS: AiProvider[] = [
     priority: 960,
     models: PUTER_MODELS,
   },
+  {
+    // TokenHarbor's OpenAI-compatible endpoint and these four zero-priced
+    // models are verified, but its quota and rate limits are not characterized.
+    // Keep it as a late fallback until production reliability is measured.
+    id: TOKENHARBOR_PROVIDER_ID,
+    baseUrl: TOKENHARBOR_BASE_URL,
+    apiKey: "",
+    format: "openai",
+    priority: 995,
+    models: TOKENHARBOR_MODELS,
+  },
+  {
+    // OrcaRouter's six current free-package aliases are registered as direct
+    // fallbacks; its free-pool router remains a separate, unregistered alias.
+    id: ORCAROUTER_PROVIDER_ID,
+    baseUrl: ORCAROUTER_BASE_URL,
+    apiKey: "",
+    format: "openai",
+    priority: 996,
+    models: ORCAROUTER_MODELS,
+  },
 ];
 
 const EXCLUDED_ORIGINAL_MODELS = new Set([
@@ -296,6 +327,18 @@ const BUILTIN_PROVIDER_ENV: BuiltinProviderEnv[] = [
     apiKeyNames: ["OMNIROUTE_OPENROUTER_API_KEY", "OPENROUTER_API_KEY"],
     baseUrlNames: ["OMNIROUTE_OPENROUTER_BASE_URL", "OPENROUTER_BASE_URL"],
     modelsNames: ["OMNIROUTE_OPENROUTER_MODELS", "OPENROUTER_MODELS"],
+  },
+  {
+    providerId: TOKENHARBOR_PROVIDER_ID,
+    apiKeyNames: ["OMNIROUTE_TOKENHARBOR_API_KEY", "TOKENHARBOR_API_KEY"],
+    baseUrlNames: ["OMNIROUTE_TOKENHARBOR_BASE_URL", "TOKENHARBOR_BASE_URL"],
+    modelsNames: ["OMNIROUTE_TOKENHARBOR_MODELS", "TOKENHARBOR_MODELS"],
+  },
+  {
+    providerId: ORCAROUTER_PROVIDER_ID,
+    apiKeyNames: ["OMNIROUTE_ORCAROUTER_API_KEY", "ORCAROUTER_API_KEY"],
+    baseUrlNames: ["OMNIROUTE_ORCAROUTER_BASE_URL", "ORCAROUTER_BASE_URL"],
+    modelsNames: ["OMNIROUTE_ORCAROUTER_MODELS", "ORCAROUTER_MODELS"],
   },
   {
     providerId: MISTRAL_PROVIDER_ID,

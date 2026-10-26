@@ -35,6 +35,16 @@ const MODEL_METADATA: Record<string, AiModelMetadata> = {
   "nvidia/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning": { family: "Nemotron", modality: "multimodal-chat", task_role: "general-reasoning", quality_tier: "frontier-open-weight", priority: "P2-free", confidence: "medium", taxonomy_source: "live-omniroute" },
   "nvidia/nvidia/nemotron-3.5-lightning-30b-a3b": { family: "Nemotron", modality: "text-chat", task_role: "general-chat", quality_tier: "frontier-open-weight", priority: "P2-free", confidence: "low", taxonomy_source: "live-omniroute" },
   "nvidia/meta/muse-glimmer-30b": { family: "Muse", modality: "multimodal-chat", task_role: "general-reasoning", quality_tier: "frontier-open-weight", priority: "P2-free", confidence: "medium", taxonomy_source: "live-omniroute" },
+  "tokenharbor/deepseek-v4.1-flash:free": { family: "DeepSeek", modality: "text-chat", task_role: "general-chat", quality_tier: "aggregated-free", priority: "P3-aggregated", confidence: "low", taxonomy_source: "live-omniroute" },
+  "tokenharbor/deepseek-v4-flash:free": { family: "DeepSeek", modality: "text-chat", task_role: "general-chat", quality_tier: "aggregated-free", priority: "P3-aggregated", confidence: "low", taxonomy_source: "live-omniroute" },
+  "tokenharbor/mimo-v2.6-flash:free": { family: "MiMo", modality: "text-chat", task_role: "general-chat", quality_tier: "aggregated-free", priority: "P3-aggregated", confidence: "low", taxonomy_source: "live-omniroute" },
+  "tokenharbor/mimo-v2.5:free": { family: "MiMo", modality: "text-chat", task_role: "general-chat", quality_tier: "aggregated-free", priority: "P3-aggregated", confidence: "low", taxonomy_source: "live-omniroute" },
+  "orcarouter/deepseek/deepseek-v4-flash-free": { family: "DeepSeek", modality: "text-chat", task_role: "general-chat", quality_tier: "aggregated-free", priority: "P3-aggregated", confidence: "low", taxonomy_source: "live-omniroute" },
+  "orcarouter/deepseek/deepseek-v4.1-flash-free": { family: "DeepSeek", modality: "text-chat", task_role: "general-chat", quality_tier: "aggregated-free", priority: "P3-aggregated", confidence: "low", taxonomy_source: "live-omniroute" },
+  "orcarouter/orca/orcaverify-text1.0-free": { family: "OrcaVerify", modality: "text-chat", task_role: "general-chat", quality_tier: "aggregated-free", priority: "P3-aggregated", confidence: "low", taxonomy_source: "live-omniroute" },
+  "orcarouter/tencent/hy3-free": { family: "Tencent HY", modality: "text-chat", task_role: "general-chat", quality_tier: "aggregated-free", priority: "P3-aggregated", confidence: "low", taxonomy_source: "live-omniroute" },
+  "orcarouter/tencent/hy4-preview-free": { family: "Tencent HY", modality: "text-chat", task_role: "general-chat", quality_tier: "aggregated-free", priority: "P3-aggregated", confidence: "low", taxonomy_source: "live-omniroute" },
+  "orcarouter/z-ai/glm-5.3-flash-free": { family: "GLM", modality: "text-chat", task_role: "general-chat", quality_tier: "aggregated-free", priority: "P3-aggregated", confidence: "low", taxonomy_source: "live-omniroute" },
 };
 
 export function getAiModelMetadata(id: string, provider: string): AiModelMetadata {
